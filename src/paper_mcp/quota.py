@@ -104,6 +104,29 @@ class QuotaStore:
             (subject_hash, resource) in self._buckets
         ) else float("inf")
 
+    def evict_full(self, *, now: float | None = None) -> int:
+        """Drop buckets that have refilled to capacity; returns how many went.
+
+        A full bucket is indistinguishable from one that never existed — the
+        next `consume` recreates it full — so this is free of behaviour
+        change. Without it nothing ever removed an entry: in open mode the key
+        is the caller's IP, so a public endpoint grew this dict by one per
+        distinct caller for the life of the process, which is a slow leak on
+        exactly the deployment shape the quota exists to protect.
+        """
+        moment = now if now is not None else time.monotonic()
+        stale = [
+            key
+            for key, bucket in self._buckets.items()
+            if bucket.tokens + (moment - bucket.updated_at) * bucket.refill_per_second
+            >= bucket.capacity
+        ]
+        for key in stale:
+            del self._buckets[key]
+        if stale:
+            logger.debug("evicted %d refilled quota bucket(s)", len(stale))
+        return len(stale)
+
 
 _store: QuotaStore | None = None
 

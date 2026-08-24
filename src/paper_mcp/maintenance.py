@@ -37,6 +37,8 @@ _SWEEPS_PER_TTL = 8
 class Swept(NamedTuple):
     artifacts: int
     jobs: int
+    # Defaulted so any existing two-field unpacking still works.
+    quota: int = 0
 
 
 def sweep_interval_seconds(ttl_hours: float) -> float:
@@ -54,10 +56,11 @@ def sweep_interval_seconds(ttl_hours: float) -> float:
 
 
 async def sweep_once() -> Swept:
-    """Reclaim expired artifacts and forgotten job handles, once."""
+    """Reclaim expired artifacts, forgotten job handles and refilled buckets."""
     # Imported here rather than at module scope: `tools.extract` owns the
     # process-level stores, and importing it eagerly would make this module
     # part of a cycle with the tool that imports the config.
+    from paper_mcp.quota import quota_store
     from paper_mcp.tools.extract import artifact_store, job_store
 
     ttl = settings().artifact_ttl_hours
@@ -66,9 +69,18 @@ async def sweep_once() -> Swept:
     # it is being swept for.
     artifacts = await asyncio.to_thread(artifact_store().sweep, ttl)
     jobs = job_store().sweep()
-    if artifacts or jobs:
-        logger.info("sweep reclaimed %d artifact(s) and %d job record(s)", artifacts, jobs)
-    return Swept(artifacts, jobs)
+    # Quota was never mentioned in this module, so its buckets were the one
+    # store that grew without bound. In memory and cheap to walk, so it stays
+    # on the loop.
+    quota = quota_store().evict_full()
+    if artifacts or jobs or quota:
+        logger.info(
+            "sweep reclaimed %d artifact(s), %d job record(s) and %d quota bucket(s)",
+            artifacts,
+            jobs,
+            quota,
+        )
+    return Swept(artifacts, jobs, quota)
 
 
 async def sweeper(
