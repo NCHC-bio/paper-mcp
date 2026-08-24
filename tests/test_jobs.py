@@ -261,3 +261,56 @@ async def test_concurrency_is_configurable_for_hardware_that_can_take_it() -> No
     assert peak == 2, f"two workers configured, {peak} ran"
     release.set()
     await _settle()
+
+
+async def test_a_full_queue_refuses_new_work() -> None:
+    """Unbounded queue depth is unbounded latency and unbounded spool disk.
+
+    Work is serialized at one extraction at a time, so a caller queued behind
+    two hundred others is hours from an answer with no way to know it, and
+    every one of those queued jobs holds its upload on disk until it runs.
+    Better told to come back.
+    """
+    import pytest
+
+    from paper_mcp.jobs import JobQueueFullError
+
+    store = JobStore(concurrency=1, max_queued=3)
+    gate = asyncio.Event()
+
+    async def blocked() -> str:
+        await gate.wait()
+        return "done"
+
+    for i in range(3):
+        store.submit(content_key=f"key-{i}", run=blocked)
+    await _settle()
+
+    with pytest.raises(JobQueueFullError) as excinfo:
+        store.submit(content_key="key-overflow", run=blocked)
+
+    assert excinfo.value.depth == 3
+    assert excinfo.value.retry_after > 0
+    assert "retry in" in str(excinfo.value)
+
+    gate.set()
+    await _settle()
+
+
+async def test_joining_an_in_flight_job_is_never_refused() -> None:
+    """The cap is on new work. A poll for work already queued still answers."""
+    store = JobStore(concurrency=1, max_queued=1)
+    gate = asyncio.Event()
+
+    async def blocked() -> str:
+        await gate.wait()
+        return "done"
+
+    first = store.submit(content_key="key-a", run=blocked)
+    await _settle()
+    again = store.submit(content_key="key-a", run=blocked)
+
+    assert again.job_id == first.job_id
+
+    gate.set()
+    await _settle()

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import secrets
 import time
 from collections.abc import Awaitable, Callable
@@ -47,14 +48,34 @@ class JobStatus(BaseModel):
     error: str | None = None
 
 
+# Roughly how long one extraction takes, for the retry advice a refused
+# caller gets. A 15-page paper measured 45 s at one page per batch; this is
+# an estimate for a hint, not a promise.
+_ESTIMATED_SECONDS_PER_JOB = 45.0
+
+
+class JobQueueFullError(Exception):
+    """More work is already queued than this service will hold."""
+
+    def __init__(self, depth: int, retry_after: float) -> None:
+        super().__init__(
+            f"{depth} extractions are already queued; retry in {math.ceil(retry_after)}s"
+        )
+        self.depth = depth
+        self.retry_after = retry_after
+
+
 class JobStore:
     """In-process job registry with coalescing and serialized execution."""
 
-    def __init__(self, *, concurrency: int = 1, ttl_seconds: float = 3600.0) -> None:
+    def __init__(
+        self, *, concurrency: int = 1, ttl_seconds: float = 3600.0, max_queued: int = 32
+    ) -> None:
         # One slot by default: Marker is the workload, and it does not
         # parallelize on a single small GPU.
         self._semaphore = asyncio.Semaphore(concurrency)
         self._ttl = ttl_seconds
+        self._max_queued = max_queued
         self._jobs: dict[str, JobStatus] = {}
         self._by_key: dict[str, str] = {}
         self._finished_at: dict[str, float] = {}
@@ -96,6 +117,14 @@ class JobStore:
             return existing
 
         ahead = sum(1 for j in self._jobs.values() if j.state in ("queued", "running"))
+        if ahead >= self._max_queued:
+            # Refused, not queued. Work is serialized, so accepting this only
+            # buys the caller a place at the back of a line it cannot see and
+            # a spool file that sits on disk until its turn comes. Checked
+            # after the join branches above, so a poll for work already in
+            # flight is never refused.
+            logger.info("queue full at %d; refusing %s", ahead, content_key)
+            raise JobQueueFullError(ahead, retry_after=ahead * _ESTIMATED_SECONDS_PER_JOB)
         job = JobStatus(
             job_id=secrets.token_urlsafe(16),
             state="queued",

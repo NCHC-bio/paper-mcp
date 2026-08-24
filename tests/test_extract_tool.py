@@ -414,3 +414,20 @@ async def test_joining_an_in_flight_job_writes_no_spool_file(
     )
 
     release.set()
+
+
+def test_the_spool_honours_its_own_setting(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The spool must be placeable on the disk sized for it.
+
+    Derived from `artifact_root.parent`, the shipped /app/artifacts put the
+    spool at /app/spool — the container's writable overlay, not the named
+    volume — so a backlog of 100 MB uploads filled the Docker root disk.
+    """
+    monkeypatch.setenv("PAPER_MCP_ARTIFACT_ROOT", str(tmp_path / "artifacts"))
+    monkeypatch.delenv("PAPER_MCP_SPOOL_DIR", raising=False)
+    assert extract_mod.spool_dir() == tmp_path / "spool"
+
+    monkeypatch.setenv("PAPER_MCP_SPOOL_DIR", str(tmp_path / "elsewhere"))
+    assert extract_mod.spool_dir() == tmp_path / "elsewhere"

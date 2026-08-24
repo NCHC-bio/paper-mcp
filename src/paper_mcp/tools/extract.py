@@ -24,7 +24,7 @@ from paper_mcp.artifacts import ArtifactStore
 from paper_mcp.bundle import Bundle
 from paper_mcp.config import settings
 from paper_mcp.context import current_principal
-from paper_mcp.jobs import JobStatus, JobStore
+from paper_mcp.jobs import JobQueueFullError, JobStatus, JobStore
 from paper_mcp.models import (
     InvalidArgumentError,
     NotFoundError,
@@ -56,17 +56,23 @@ def artifact_store() -> ArtifactStore:
 def job_store() -> JobStore:
     global _jobs
     if _jobs is None:
-        _jobs = JobStore(concurrency=settings().job_concurrency)
+        cfg = settings()
+        _jobs = JobStore(concurrency=cfg.job_concurrency, max_queued=cfg.max_queued_jobs)
     return _jobs
 
 
 def spool_dir() -> Path:
     """Where uploads wait on disk between acceptance and extraction.
 
-    Beside the artifact cache rather than inside it: these are the caller's
-    original documents, and nothing here is ever served over HTTP.
+    Beside the artifact cache by default rather than inside it: these are the
+    caller's original documents, and nothing here is ever served over HTTP.
+    Overridable because the derived path was not on a volume — with the
+    shipped /app/artifacts it landed on /app/spool, the container's writable
+    layer, so a backlog filled the Docker root disk instead of the volume
+    that was sized for this data.
     """
-    path = settings().artifact_root.parent / "spool"
+    cfg = settings()
+    path = cfg.spool_root or cfg.artifact_root.parent / "spool"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -281,7 +287,12 @@ async def tool_extract_pdf(content_base64: str, filename: str | None = None) -> 
 
     # Keyed by content, so two callers uploading the same paper join one job
     # rather than queueing two identical GPU runs.
-    handle = jobs.submit(content_key=key, run=run)
+    try:
+        handle = jobs.submit(content_key=key, run=run)
+    except JobQueueFullError as exc:
+        # Nothing will ever read this file: no job adopted it.
+        spooled.unlink(missing_ok=True)
+        raise RateLimitedError(str(exc), retry_after=exc.retry_after) from exc
     job = handle
     if incumbent is not None and job.job_id == incumbent.job_id:
         # `run` was never adopted: this call joined an in-flight job, or was

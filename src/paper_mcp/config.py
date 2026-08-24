@@ -47,6 +47,18 @@ class Settings:
     job_concurrency: int
     artifact_root: Path
     artifact_ttl_hours: float
+    # Where uploads wait between acceptance and extraction. `None` keeps the
+    # derived location beside the artifact cache, which is where it has always
+    # been — but under the shipped PAPER_MCP_ARTIFACT_ROOT=/app/artifacts that
+    # derives to /app/spool, and only /app/artifacts is a volume. A backlog of
+    # 100 MB uploads therefore filled the container's writable layer instead
+    # of the disk sized for this data. Settable so a deployment can say where.
+    spool_root: Path | None
+    # How much work may be queued before new work is refused. Extraction is
+    # serialized, so an unbounded queue is unbounded latency and unbounded
+    # spool disk: a caller told "queue full, retry in Ns" is better served
+    # than one whose job sits behind two hundred others.
+    max_queued_jobs: int
     oidc_issuer: str | None
     oidc_audience: str | None
     # Whether `X-Forwarded-For` names the client. Off unless an operator
@@ -102,6 +114,12 @@ def settings() -> Settings:
         job_concurrency=max(1, int(os.environ.get("PAPER_MCP_JOB_CONCURRENCY", "1"))),
         artifact_root=Path(os.environ.get("PAPER_MCP_ARTIFACT_ROOT", "artifacts")),
         artifact_ttl_hours=float(os.environ.get("PAPER_MCP_ARTIFACT_TTL_HOURS", "24")),
+        spool_root=(
+            Path(os.environ["PAPER_MCP_SPOOL_DIR"])
+            if os.environ.get("PAPER_MCP_SPOOL_DIR")
+            else None
+        ),
+        max_queued_jobs=max(1, int(os.environ.get("PAPER_MCP_MAX_QUEUED_JOBS", "32"))),
         # This service is a resource server: it validates tokens against an
         # IdP the operator brings, and never issues them.
         oidc_issuer=os.environ.get("PAPER_MCP_OIDC_ISSUER") or None,
