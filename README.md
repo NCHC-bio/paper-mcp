@@ -265,16 +265,22 @@ uv run paper-mcp
 
 The interpreter is pinned in `.python-version` (3.13) so every contributor and the container build agree on one runtime (NFR-07).
 
-**pytest proves the code runs; it cannot prove the product works.** Mocked tests are blind to upstream contracts by construction, so the on-device check is load-bearing:
+**pytest proves the code runs; it cannot prove the product works.** Mocked tests are blind to upstream contracts by construction, so three on-device checks are load-bearing:
 
 ```bash
 uv run python scripts/paper_workflow_check.py path/to/paper.pdf  # the real workflow, judged on content
+uv run python scripts/authenticated_client_check.py              # a real MCP client, with auth armed
+uv run python scripts/security_check.py                          # the shipped image, probed from outside
 ```
 
-It boots the service through its real entry point, drives it with a real MCP client over the wire, and judges the *output*: does the markdown have tables whose cell counts survived the render, equations as LaTeX, a populated and captioned figure index, and figure URLs that download real image bytes? Slow by nature — Marker takes roughly a minute per dense page. It takes a path to a PDF; acquiring the paper is your job, as it is the calling agent's.
+The first boots the service through its real entry point, drives it with a real MCP client over the wire, and judges the *output*: does the markdown have tables whose cell counts survived the render, equations as LaTeX, a populated and captioned figure index, and figure URLs that download real image bytes? Slow by nature — Marker takes roughly a minute per dense page. It takes a path to a PDF; acquiring the paper is your job, as it is the calling agent's.
 
-> [!WARNING]
-> `scripts/authenticated_client_check.py` and `scripts/security_check.py` **predate v1.0 and do not currently pass.** Both still drive tools that were deleted with discovery and LaTeX compilation — the first fails outright on `resolve_paper`/`search_papers`/`fetch_paper` and asserts a seven-tool surface against today's two; the second's three `compile_latex` probes now pass *vacuously*, reporting a LaTeX sandbox as verified when the tool it sandboxed no longer exists. Do not read either as a green light until they are rewritten against `extract_pdf`.
+The second stands up a real IdP, mints a real token, and drives `extract_pdf` → `get_job` → bundle through the Streamable HTTP transport a connector uses, against the container with auth and quota armed. It also proves the negative half: an anonymous client and a wrong-audience client cannot open a session at all, no session id is ever issued, and the GPU budget refuses a second document. With no argument it generates a one-page PDF; give it a real paper to also judge the content.
+
+The third builds the image and attacks it from outside — transport security, path traversal on the artifact route, token forgery, quota, and the method guard on `/mcp`.
+
+> [!NOTE]
+> Both container-based checks reach Marker on the host at `:8002` by default. Set `PAPER_MCP_MARKER_HOST_PORT` if it is published elsewhere — that port collides in practice.
 
 Between them these have caught defects the unit suite passed clean: a `307` redirect on `POST /mcp` (the in-process test client follows redirects), a Semantic Scholar field name one endpoint accepts and another rejects, a `similar` mode pointed at an endpoint that does not exist, a synchronous arXiv client blocking the event loop (three concurrent calls: 20.5 s → 0.7 s once threaded), and a bundle that persisted absolute artifact URLs — so a warm cache surviving a redeploy handed out figure links to an origin that no longer answered.
 
