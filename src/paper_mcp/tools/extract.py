@@ -14,6 +14,7 @@ import asyncio
 import base64
 import binascii
 import logging
+import secrets
 from pathlib import Path
 from typing import Literal
 
@@ -22,10 +23,17 @@ from pydantic import BaseModel, Field
 from paper_mcp.artifacts import ArtifactStore
 from paper_mcp.bundle import Bundle
 from paper_mcp.config import settings
+from paper_mcp.context import current_principal
 from paper_mcp.jobs import JobStatus, JobStore
-from paper_mcp.models import InvalidArgumentError, NotFoundError, UpstreamError
+from paper_mcp.models import (
+    InvalidArgumentError,
+    NotFoundError,
+    RateLimitedError,
+    UpstreamError,
+)
 from paper_mcp.pipelines.build_bundle import build_bundle, bundle_key, load_cached
 from paper_mcp.pipelines.marker_client import MarkerClient, page_count
+from paper_mcp.quota import QuotaExceededError, quota_store
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +69,24 @@ def spool_dir() -> Path:
     path = settings().artifact_root.parent / "spool"
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def spool_path(content_key: str) -> Path:
+    """A fresh file for one upload of `content_key`.
+
+    Unique per call, deliberately, even though the bytes are not. The path
+    was `<content-sha>.pdf`, which made two callers uploading the same paper
+    name the same file — and `write_bytes` truncates on open, so one call's
+    write landed inside the other's read. A live 8-way run produced exactly
+    that: the running job read zero bytes and the caller was told its PDF was
+    "truncated or corrupt" and that a retry would not help, about a document
+    that was perfectly fine.
+
+    Content addressing is right for the artifact cache, where an entry is
+    immutable and shared on purpose. The spool is the opposite: a mutable
+    file with one reader and a lifetime of a single job.
+    """
+    return spool_dir() / f"{content_key.removeprefix('sha256:')}-{secrets.token_hex(8)}.pdf"
 
 
 def clear_spool() -> int:
@@ -151,6 +177,32 @@ def decode_pdf(content_base64: str, *, max_bytes: int) -> bytes:
     return data
 
 
+def charge_extraction() -> None:
+    """Spend one unit of the caller's GPU budget, or refuse the extraction.
+
+    Called only on a cache miss, because the budget meters GPU minutes and a
+    cache hit costs none. Charging every call would turn
+    `PAPER_MCP_QUOTA_EXTRACTIONS_PER_HOUR` into a second call limit and would
+    punish the exact pattern `extract_pdf`'s own hint recommends — call again
+    until the cache is warm.
+
+    Nothing charged this before: the middleware consumes `"calls"` and only
+    `"calls"`, so the setting was documented, configurable, and inert. With
+    one worker by default, an unmetered caller is one who can hold the queue
+    against everyone else indefinitely.
+
+    No principal means no request context — a direct call, or a test. Not
+    metered, rather than metered against a key that means nothing.
+    """
+    principal = current_principal()
+    if principal is None:
+        return
+    try:
+        quota_store().consume(principal.subject_hash, "extractions")
+    except QuotaExceededError as exc:
+        raise RateLimitedError(str(exc), retry_after=exc.retry_after) from exc
+
+
 async def tool_extract_pdf(content_base64: str, filename: str | None = None) -> ExtractResult:
     """Extract a caller-supplied PDF into markdown plus a figure index."""
     cfg = settings()
@@ -167,6 +219,11 @@ async def tool_extract_pdf(content_base64: str, filename: str | None = None) -> 
             hint="Cached. markdown holds the document; figures[].image_url resolves to images.",
         )
 
+    # Past this point the call is going to cost GPU time, so this is where
+    # the extraction budget is spent — after the cache has been consulted and
+    # before any work is queued.
+    charge_extraction()
+
     jobs = job_store()
 
     # Spooled rather than closed over. A queued job that holds its upload in
@@ -174,7 +231,7 @@ async def tool_extract_pdf(content_base64: str, filename: str | None = None) -> 
     # a 100 MB ceiling and a single worker, ten waiting uploads pinned
     # hundreds of megabytes for no reason but waiting. On disk, the cost is
     # one in-flight document regardless of queue depth.
-    spooled = spool_dir() / f"{key.removeprefix('sha256:')}.pdf"
+    spooled = spool_path(key)
     spooled.write_bytes(pdf)
 
     async def run() -> str:
@@ -202,8 +259,19 @@ async def tool_extract_pdf(content_base64: str, filename: str | None = None) -> 
 
     # Keyed by content, so two callers uploading the same paper join one job
     # rather than queueing two identical GPU runs.
+    incumbent = jobs.for_key(key)
     handle = jobs.submit(content_key=key, run=run)
     job = handle
+    if incumbent is not None and job.job_id == incumbent.job_id:
+        # `run` was never adopted: this call joined an in-flight job, or was
+        # handed a failed one to report. Only the job that owns a spool file
+        # deletes it, so the file written above has no owner and would sit
+        # there until a restart — up to 100 MB per orphan, on exactly the
+        # papers that are popular or that give trouble.
+        #
+        # Comparing job ids is safe because `submit` never awaits: nothing
+        # else can run between reading the incumbent and getting the answer.
+        spooled.unlink(missing_ok=True)
     if job.state == "error":
         # The store hands a previously-failed job back so the failure is seen
         # rather than silently re-queued. Reporting it as `extracting` would

@@ -8,7 +8,7 @@ import pytest
 
 import paper_mcp.tools.extract as extract_mod
 from paper_mcp.artifacts import ArtifactStore
-from paper_mcp.models import InvalidArgumentError
+from paper_mcp.models import InvalidArgumentError, UpstreamError
 from paper_mcp.tools.extract import decode_pdf
 
 
@@ -91,11 +91,25 @@ async def test_a_failed_extraction_is_reported_not_dressed_as_progress(
     from paper_mcp.models import UpstreamError
 
     class _Store:
+        """A store holding one already-failed job for whatever is asked of it.
+
+        `for_key` and `submit` answer with the *same* handle, as the real
+        store does when it hands a failure back: `submit`'s error branch
+        returns the incumbent rather than starting over. A stub that answered
+        `submit` but not `for_key` would let the caller's spool cleanup go
+        untested against the one path that most needs it.
+        """
+
+        _failed = JobStatus(
+            job_id="dead", state="error", content_key="sha256:x",
+            error="Marker returned HTTP 500",
+        )
+
+        def for_key(self, content_key: str) -> JobStatus:
+            return self._failed
+
         def submit(self, *, content_key: str, run: object) -> JobStatus:
-            return JobStatus(
-                job_id="dead", state="error", content_key=content_key,
-                error="Marker returned HTTP 500",
-            )
+            return self._failed
 
     monkeypatch.setattr(extract_mod, "job_store", lambda: _Store())
     monkeypatch.setattr(extract_mod, "artifact_store", lambda: ArtifactStore(tmp_path))
@@ -220,3 +234,92 @@ def test_orphaned_spool_files_are_cleared_at_startup(
 
     assert removed == 1
     assert not orphan.exists()
+
+
+def test_two_uploads_of_one_paper_get_separate_spool_files() -> None:
+    """Concurrent callers must not share a file one of them is reading.
+
+    The spool path was `<content-sha>.pdf`, so two callers uploading the same
+    paper named the same file — and `write_bytes` truncates on open. A live
+    8-way run hit it: the running job's `read_bytes` landed inside the second
+    caller's write and saw zero bytes, so extraction failed with
+    `EmptyFileError` and the caller was told its PDF was "truncated or
+    corrupt" and that retrying would not help. The document was fine.
+
+    Content addressing is right for the *cache*, where entries are immutable.
+    It is wrong for the spool, where each upload is a separate mutable file
+    with its own lifetime.
+    """
+    key = "sha256:" + "a" * 64
+
+    first = extract_mod.spool_path(key)
+    second = extract_mod.spool_path(key)
+
+    assert first != second, "two uploads of one paper must not share a spool file"
+    assert first.parent == second.parent == extract_mod.spool_dir()
+    assert first.suffix == second.suffix == ".pdf"
+
+
+async def test_joining_an_in_flight_job_leaves_nothing_in_the_spool(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A caller that starts no work must not leave its upload behind.
+
+    The second caller of a coalesced pair spools its bytes and then joins the
+    running job, whose `run` closure only ever unlinks *its own* file. With
+    one path per upload that orphan is nobody's to clean, so it survives
+    until a restart — at up to 100 MB a time.
+    """
+    release = asyncio.Event()
+
+    async def _blocking_build(pdf: bytes, **kwargs: object) -> object:
+        await release.wait()
+        raise RuntimeError("never completes during this test")
+
+    monkeypatch.setattr(extract_mod, "build_bundle", _blocking_build)
+    monkeypatch.setattr(extract_mod, "artifact_store", lambda: ArtifactStore(tmp_path))
+    monkeypatch.setattr(extract_mod, "_jobs", None)
+    monkeypatch.setenv("PAPER_MCP_ARTIFACT_ROOT", str(tmp_path / "artifacts"))
+
+    pdf = _real_pdf()
+    first = await extract_mod.tool_extract_pdf(_b64(pdf))
+    second = await extract_mod.tool_extract_pdf(_b64(pdf))
+
+    assert first.job is not None and second.job is not None
+    assert first.job.job_id == second.job.job_id, "the same paper must share one job"
+    spooled = list(extract_mod.spool_dir().glob("*.pdf"))
+    assert len(spooled) == 1, f"the joining caller left its upload behind: {spooled}"
+
+    release.set()
+
+
+async def test_being_handed_a_failed_job_leaves_nothing_in_the_spool(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Reporting a failure must not also leak the upload that reported it.
+
+    `tool_extract_pdf` spools before it submits, and the failed-job branch
+    raises — so the bytes stay on disk with no job left to clean them. The
+    documents that give trouble are exactly the ones a caller retries, so
+    this leaks on repeat.
+    """
+    async def _failing_build(pdf: bytes, **kwargs: object) -> object:
+        raise RuntimeError("marker fell over")
+
+    monkeypatch.setattr(extract_mod, "build_bundle", _failing_build)
+    monkeypatch.setattr(extract_mod, "artifact_store", lambda: ArtifactStore(tmp_path))
+    monkeypatch.setattr(extract_mod, "_jobs", None)
+    monkeypatch.setenv("PAPER_MCP_ARTIFACT_ROOT", str(tmp_path / "artifacts"))
+
+    pdf = _real_pdf()
+    await extract_mod.tool_extract_pdf(_b64(pdf))
+    for _ in range(200):
+        await asyncio.sleep(0.01)
+        if not list(extract_mod.spool_dir().glob("*.pdf")):
+            break
+
+    with pytest.raises(UpstreamError, match="marker fell over"):
+        await extract_mod.tool_extract_pdf(_b64(pdf))
+
+    spooled = list(extract_mod.spool_dir().glob("*.pdf"))
+    assert not spooled, f"the failure report left the upload behind: {spooled}"
