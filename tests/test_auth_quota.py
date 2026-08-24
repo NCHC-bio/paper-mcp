@@ -456,3 +456,94 @@ def test_a_declared_proxy_deployment_still_meters_each_client_separately(
             codes.append(resp.status_code)
 
     assert codes == [200] * 8, f"a declared proxy must meter per client: {codes}"
+
+
+async def test_verifying_a_token_does_not_block_the_event_loop(
+    keypair: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A slow IdP must degrade authentication, not the whole service.
+
+    `httpx.get` held the loop for the entire JWKS round trip, so one request
+    with one bogus token froze every other request, `/health` included:
+    measured at 16,613 ms against a 248 ms idle baseline.
+    """
+    monkeypatch.setenv("PAPER_MCP_AUTH_MODE", "oidc")
+    monkeypatch.setenv("PAPER_MCP_OIDC_ISSUER", _ISSUER)
+    monkeypatch.setenv("PAPER_MCP_OIDC_AUDIENCE", _AUDIENCE)
+
+    async def slow_jwks(_request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(0.5)
+        return httpx.Response(200, json=_jwks(keypair))
+
+    ticks = 0
+
+    async def heartbeat() -> None:
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.01)
+            ticks += 1
+
+    with respx.mock:
+        respx.get(_JWKS_URL).mock(side_effect=slow_jwks)
+        beat = asyncio.create_task(heartbeat())
+        try:
+            await auth_mod.verify_token(_token(keypair))
+        finally:
+            beat.cancel()
+
+    # A blocking fetch pins the loop and the heartbeat never runs. An awaited
+    # one lets tens of ticks through in the same half second.
+    assert ticks > 10, f"loop advanced only {ticks} ticks during a 0.5s JWKS fetch"
+
+
+async def test_concurrent_misses_share_one_jwks_fetch(
+    keypair: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Single-flighted: ten cold callers cost the IdP one round trip, not ten."""
+    monkeypatch.setenv("PAPER_MCP_AUTH_MODE", "oidc")
+    monkeypatch.setenv("PAPER_MCP_OIDC_ISSUER", _ISSUER)
+    monkeypatch.setenv("PAPER_MCP_OIDC_AUDIENCE", _AUDIENCE)
+
+    calls = 0
+
+    async def counted(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.05)
+        return httpx.Response(200, json=_jwks(keypair))
+
+    with respx.mock:
+        respx.get(_JWKS_URL).mock(side_effect=counted)
+        token = _token(keypair)
+        await asyncio.gather(*(auth_mod.verify_token(token) for _ in range(10)))
+
+    assert calls == 1, f"{calls} JWKS fetches for 10 concurrent verifications"
+
+
+async def test_an_unreachable_idp_is_paid_for_once_per_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failure is cached, so a degraded IdP does not charge every request.
+
+    Nothing was ever cached on the failure path, so three consecutive
+    requests each paid the full timeout: 10.50 s, 10.40 s, 10.39 s.
+    """
+    monkeypatch.setenv("PAPER_MCP_AUTH_MODE", "oidc")
+    monkeypatch.setenv("PAPER_MCP_OIDC_ISSUER", _ISSUER)
+    monkeypatch.setenv("PAPER_MCP_OIDC_AUDIENCE", _AUDIENCE)
+
+    calls = 0
+
+    async def unreachable(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        raise httpx.ConnectError("no route to host")
+
+    with respx.mock:
+        respx.get(_JWKS_URL).mock(side_effect=unreachable)
+        token = jwt.encode({"sub": "x"}, "secret", headers={"kid": _KID})
+        for _ in range(3):
+            with pytest.raises(auth_mod.AuthError):
+                await auth_mod.verify_token(token)
+
+    assert calls == 1, f"{calls} fetches for 3 requests against an unreachable IdP"

@@ -85,7 +85,7 @@ class AuthQuotaMiddleware(BaseHTTPMiddleware):
             if scheme.lower() != "bearer" or not token:
                 return _unauthorized("a bearer token is required")
             try:
-                principal = verify_token(token)
+                principal = await verify_token(token)
             except AuthError:
                 # Deliberately uniform: distinguishing expired from
                 # wrong-audience from bad-signature tells an attacker which

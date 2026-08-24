@@ -12,6 +12,7 @@ metering needs a stable key, not a record of which person read which paper.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import logging
@@ -36,6 +37,19 @@ _MIN_REFETCH_INTERVAL = 30.0
 _jwks_cache: dict[str, Any] | None = None
 _jwks_fetched_at = 0.0
 _last_refetch_attempt = 0.0
+# One client for the process. A fresh `AsyncClient` per verification means a
+# fresh TCP and TLS handshake against the IdP for every request that misses.
+_jwks_client: httpx.AsyncClient | None = None
+# Created lazily rather than at import: a lock binds to the loop that first
+# awaits it, and the test suite runs more than one loop.
+_jwks_lock: asyncio.Lock | None = None
+# When the last fetch failed, how long to refuse without trying again. An
+# unreachable IdP never populates the cache, so without this every request
+# pays the full 10 s timeout — measured at 10.50 s, 10.40 s and 10.39 s for
+# three consecutive requests, which is the whole service offline rather than
+# authentication degraded.
+_negative_until = 0.0
+_NEGATIVE_TTL_SECONDS = 30.0
 
 
 class AuthError(Exception):
@@ -75,55 +89,109 @@ def anonymous_principal(client_ip: str) -> Principal:
 
 def reset_jwks_cache() -> None:
     global _jwks_cache, _jwks_fetched_at, _last_refetch_attempt
+    global _jwks_client, _jwks_lock, _negative_until
     _jwks_cache = None
     _jwks_fetched_at = 0.0
     _last_refetch_attempt = 0.0
+    _negative_until = 0.0
+    # Dropped rather than closed: this is test-scope teardown, and closing
+    # needs a running loop that may already be gone.
+    _jwks_client = None
+    _jwks_lock = None
 
 
 def _jwks_url(issuer: str) -> str:
     return f"{issuer.rstrip('/')}/.well-known/jwks.json"
 
 
-def _fetch_jwks(issuer: str) -> dict[str, Any]:
+def _client() -> httpx.AsyncClient:
+    global _jwks_client
+    if _jwks_client is None:
+        _jwks_client = httpx.AsyncClient(timeout=httpx.Timeout(10.0))
+    return _jwks_client
+
+
+def _lock() -> asyncio.Lock:
+    global _jwks_lock
+    if _jwks_lock is None:
+        _jwks_lock = asyncio.Lock()
+    return _jwks_lock
+
+
+async def _fetch_jwks(issuer: str) -> dict[str, Any]:
     """Fetch the issuer's key set over httpx.
 
     Deliberately not `PyJWKClient`, which fetches with `urllib`: every other
     outbound call here is httpx, and a second HTTP stack means different
     timeout and proxy behaviour, and nothing respx or a test can observe.
+
+    Awaited, not blocking. `httpx.get` here ran inside async middleware and
+    held the event loop for the whole IdP round trip: against an 8 s JWKS
+    endpoint, one request with one bogus token pushed `/health` to 16.6 s
+    against a 248 ms idle baseline. No valid token was needed to trigger it,
+    only a well-formed JWT header.
     """
-    response = httpx.get(_jwks_url(issuer), timeout=httpx.Timeout(10.0))
+    response = await _client().get(_jwks_url(issuer))
     response.raise_for_status()
     payload: dict[str, Any] = response.json()
     return payload
 
 
-def _signing_key(token: str, issuer: str) -> Any:
+async def _refresh(issuer: str, *, force: bool = False) -> None:
+    """Populate the key-set cache, once however many callers are waiting.
+
+    `force` is the unknown-kid path, which must refetch a cache that is still
+    inside its TTL — otherwise a rotated key locks every caller out until the
+    hour is up.
+    """
+    global _jwks_cache, _jwks_fetched_at, _negative_until
+
+    async with _lock():
+        now = time.monotonic()
+        # Another waiter may have refreshed while this one held at the lock.
+        if not force and _jwks_cache is not None and now - _jwks_fetched_at <= _JWKS_TTL_SECONDS:
+            return
+        if now < _negative_until:
+            raise AuthError("jwks unavailable")
+        try:
+            fetched = await _fetch_jwks(issuer)
+        except (httpx.HTTPError, ValueError) as exc:
+            _negative_until = time.monotonic() + _NEGATIVE_TTL_SECONDS
+            logger.info("jwks fetch failed: %s", type(exc).__name__)
+            raise AuthError("jwks unavailable") from exc
+        _jwks_cache = fetched
+        _jwks_fetched_at = time.monotonic()
+        _negative_until = 0.0
+
+
+async def _signing_key(token: str, issuer: str) -> Any:
     """Resolve the key that signed `token`, refetching once on an unknown kid."""
-    global _jwks_cache, _jwks_fetched_at, _last_refetch_attempt
+    global _last_refetch_attempt
 
     try:
         kid = jwt.get_unverified_header(token).get("kid")
     except jwt.PyJWTError as exc:
         raise AuthError("malformed token header") from exc
 
-    now = time.monotonic()
-    if _jwks_cache is None or now - _jwks_fetched_at > _JWKS_TTL_SECONDS:
-        _jwks_cache = _fetch_jwks(issuer)
-        _jwks_fetched_at = now
+    if _jwks_cache is None or time.monotonic() - _jwks_fetched_at > _JWKS_TTL_SECONDS:
+        await _refresh(issuer)
 
-    key = _match_kid(_jwks_cache, kid)
+    key = _match_kid(_jwks_cache or {}, kid)
     if key is not None:
         return key
 
     # Keys rotate; a stale cache must not lock every caller out. One refetch,
     # rate-limited so unknown kids cannot be turned into a battering ram
-    # against the IdP.
+    # against the IdP. The rate limit bounds how *often* this happens — it
+    # never bounded what it cost when it did, which is what made an unknown
+    # kid a freeze anyone could trigger on demand. The single-flight and the
+    # negative cache bound the cost.
+    now = time.monotonic()
     if now - _last_refetch_attempt < _MIN_REFETCH_INTERVAL:
         raise AuthError("unknown signing key")
     _last_refetch_attempt = now
-    _jwks_cache = _fetch_jwks(issuer)
-    _jwks_fetched_at = now
-    key = _match_kid(_jwks_cache, kid)
+    await _refresh(issuer, force=True)
+    key = _match_kid(_jwks_cache or {}, kid)
     if key is None:
         raise AuthError("unknown signing key")
     return key
@@ -136,7 +204,7 @@ def _match_kid(jwks: dict[str, Any], kid: str | None) -> Any:
     return None
 
 
-def verify_token(
+async def verify_token(
     token: str, *, issuer: str | None = None, audience: str | None = None
 ) -> Principal:
     """Verify a bearer JWT and return the caller's principal."""
@@ -147,7 +215,7 @@ def verify_token(
         raise AuthError("OIDC issuer/audience are not configured")
 
     try:
-        signing_key = _signing_key(token, issuer)
+        signing_key = await _signing_key(token, issuer)
     except AuthError:
         raise
     except (httpx.HTTPError, jwt.PyJWTError, ValueError, KeyError) as exc:
