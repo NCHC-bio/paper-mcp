@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import base64
+from pathlib import Path
 
 import pytest
 
+import paper_mcp.tools.extract as extract_mod
+from paper_mcp.artifacts import ArtifactStore
 from paper_mcp.models import InvalidArgumentError
 from paper_mcp.tools.extract import decode_pdf
 
@@ -53,3 +56,30 @@ def test_the_size_limit_is_measured_on_decoded_bytes_not_the_encoding() -> None:
     assert len(_b64(data)) > 1000
 
     assert decode_pdf(_b64(data), max_bytes=1000) == data
+
+
+async def test_a_failed_extraction_is_reported_not_dressed_as_progress(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`status: extracting` on a job that already failed is a lie.
+
+    The store now hands a failed job back, but the tool still has to tell the
+    caller. Returning "extracting" with a dead job is what made the loop
+    invisible: the hint said call again, the status said in progress, and the
+    error lived somewhere the hint never mentioned.
+    """
+    from paper_mcp.jobs import JobStatus
+    from paper_mcp.models import UpstreamError
+
+    class _Store:
+        def submit(self, *, content_key: str, run: object) -> JobStatus:
+            return JobStatus(
+                job_id="dead", state="error", content_key=content_key,
+                error="Marker returned HTTP 500",
+            )
+
+    monkeypatch.setattr(extract_mod, "job_store", lambda: _Store())
+    monkeypatch.setattr(extract_mod, "artifact_store", lambda: ArtifactStore(tmp_path))
+
+    with pytest.raises(UpstreamError, match="HTTP 500"):
+        await extract_mod.tool_extract_pdf(_b64(_PDF))

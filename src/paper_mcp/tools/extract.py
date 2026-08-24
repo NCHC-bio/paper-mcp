@@ -21,7 +21,7 @@ from paper_mcp.artifacts import ArtifactStore
 from paper_mcp.bundle import Bundle
 from paper_mcp.config import settings
 from paper_mcp.jobs import JobStatus, JobStore
-from paper_mcp.models import InvalidArgumentError, NotFoundError
+from paper_mcp.models import InvalidArgumentError, NotFoundError, UpstreamError
 from paper_mcp.pipelines.build_bundle import build_bundle, bundle_key, load_cached
 from paper_mcp.pipelines.marker_client import MarkerClient
 
@@ -127,6 +127,17 @@ async def tool_extract_pdf(content_base64: str, filename: str | None = None) -> 
     # Keyed by content, so two callers uploading the same paper join one job
     # rather than queueing two identical GPU runs.
     job = job_store().submit(content_key=key, run=run)
+    if job.state == "error":
+        # The store hands a previously-failed job back so the failure is seen
+        # rather than silently re-queued. Reporting it as `extracting` would
+        # keep it invisible: the hint below says call again, so a caller would
+        # loop on a dead job forever. The store has already released the key,
+        # so calling again genuinely retries.
+        raise UpstreamError(
+            f"extraction of these bytes failed: {job.error or 'unknown error'}. "
+            "Calling extract_pdf again retries it; a repeat failure is the "
+            "document, not a transient fault."
+        )
     return ExtractResult(
         status="extracting",
         job=job,

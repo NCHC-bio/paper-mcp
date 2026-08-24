@@ -137,3 +137,42 @@ async def test_sweep_drops_finished_jobs_but_not_running_ones() -> None:
 
     assert removed == 1
     assert store.get(done.job_id) is None
+
+
+async def test_a_failed_job_is_handed_back_once_then_allows_a_retry() -> None:
+    """Resubmitting after a failure must surface it, not start over silently.
+
+    `submit` rejoined only `queued`/`running`, so a caller following
+    `extract_pdf`'s own hint — "call extract_pdf again" — got a brand-new job
+    and `status: extracting` every time. The error was reachable only through
+    `get_job`, which the hint never mentioned: an infinite loop driven by our
+    own advice, burning a slot per turn on a single-worker queue.
+
+    Handing the failure back *forever* would be the opposite mistake, since a
+    transient cause (Marker restarting) could then never be retried. So the
+    error is returned once and the key released.
+    """
+    store = JobStore()
+    attempts = 0
+
+    async def _boom() -> str:
+        nonlocal attempts
+        attempts += 1
+        raise RuntimeError("marker died")
+
+    first = store.submit(content_key="sha256:abc", run=_boom)
+    await _settle()
+    assert store.get(first.job_id).state == "error"  # type: ignore[union-attr]
+
+    # Second call sees the failure instead of silently queueing another run.
+    second = store.submit(content_key="sha256:abc", run=_boom)
+    assert second.job_id == first.job_id
+    assert second.state == "error"
+    assert second.error and "marker died" in second.error
+    assert attempts == 1, "the failure was reported, not re-run"
+
+    # Third call is free to retry, so a transient fault is not permanent.
+    third = store.submit(content_key="sha256:abc", run=_boom)
+    await _settle()
+    assert third.job_id != first.job_id
+    assert attempts == 2

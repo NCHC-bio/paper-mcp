@@ -82,6 +82,18 @@ class JobStore:
         if existing is not None and existing.state in ("queued", "running"):
             logger.debug("joining in-flight job %s for %s", existing.job_id, content_key)
             return existing
+        if existing is not None and existing.state == "error":
+            # Hand the failure back rather than silently starting over. The
+            # caller was told to "call extract_pdf again", so re-queueing here
+            # loops forever and the error is only ever visible through
+            # get_job, which that advice never mentions.
+            #
+            # Released immediately after, so the next call may retry: a
+            # transient cause — Marker restarting mid-extraction — must not
+            # become permanent for those bytes.
+            logger.debug("reporting failed job %s for %s", existing.job_id, content_key)
+            self._by_key.pop(content_key, None)
+            return existing
 
         job = JobStatus(
             job_id=secrets.token_urlsafe(16),
