@@ -10,9 +10,11 @@ to do it than this service had.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import logging
+from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -46,8 +48,40 @@ def artifact_store() -> ArtifactStore:
 def job_store() -> JobStore:
     global _jobs
     if _jobs is None:
-        _jobs = JobStore()
+        _jobs = JobStore(concurrency=settings().job_concurrency)
     return _jobs
+
+
+def spool_dir() -> Path:
+    """Where uploads wait on disk between acceptance and extraction.
+
+    Beside the artifact cache rather than inside it: these are the caller's
+    original documents, and nothing here is ever served over HTTP.
+    """
+    path = settings().artifact_root.parent / "spool"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def clear_spool() -> int:
+    """Delete every spooled upload; returns how many went.
+
+    Called at startup, where the reasoning is exact rather than heuristic:
+    the job store is in memory, so a restart has already forgotten every job,
+    and any file still here is waiting for work that will never resume. With
+    a 100 MB ceiling, leaving them is how a long-lived deployment fills its
+    disk with documents nobody wants.
+    """
+    removed = 0
+    for stale in spool_dir().glob("*.pdf"):
+        try:
+            stale.unlink()
+            removed += 1
+        except OSError:  # pragma: no cover - a file in use is not fatal
+            logger.warning("could not clear spooled upload %s", stale.name)
+    if removed:
+        logger.info("cleared %d spooled upload(s) orphaned by a restart", removed)
+    return removed
 
 
 def marker_client() -> MarkerClient:
@@ -135,21 +169,36 @@ async def tool_extract_pdf(content_base64: str, filename: str | None = None) -> 
 
     jobs = job_store()
 
+    # Spooled rather than closed over. A queued job that holds its upload in
+    # memory turns a queue of large papers into a queue of large buffers: with
+    # a 100 MB ceiling and a single worker, ten waiting uploads pinned
+    # hundreds of megabytes for no reason but waiting. On disk, the cost is
+    # one in-flight document regardless of queue depth.
+    spooled = spool_dir() / f"{key.removeprefix('sha256:')}.pdf"
+    spooled.write_bytes(pdf)
+
     async def run() -> str:
         def _progress(done: int, total: int) -> None:
             # The job handle is bound by the time any page finishes.
             jobs.report(handle.job_id, f"extracting page {done}/{total}")
 
-        bundle = await build_bundle(
-            pdf,
-            filename=filename,
-            store=store,
-            marker=marker_client(),
-            max_pages=cfg.marker_max_pages,
-            ttl_hours=cfg.artifact_ttl_hours,
-            on_progress=_progress,
-        )
-        return bundle.bundle_id
+        try:
+            data = await asyncio.to_thread(spooled.read_bytes)
+            bundle = await build_bundle(
+                data,
+                filename=filename,
+                store=store,
+                marker=marker_client(),
+                max_pages=cfg.marker_max_pages,
+                ttl_hours=cfg.artifact_ttl_hours,
+                on_progress=_progress,
+            )
+            return bundle.bundle_id
+        finally:
+            # Cleared whether the extraction succeeded or failed: a spool that
+            # only empties on success fills up on exactly the documents that
+            # gave trouble.
+            spooled.unlink(missing_ok=True)
 
     # Keyed by content, so two callers uploading the same paper join one job
     # rather than queueing two identical GPU runs.

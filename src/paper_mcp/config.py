@@ -37,6 +37,12 @@ class Settings:
     # job is queued — so this is a ceiling on memory per in-flight extraction,
     # which is what the per-caller quota exists to bound.
     max_upload_bytes: int
+    # Extractions allowed to run at once. 1 because VRAM scales with page
+    # content density and a second concurrent dense page OOMs a 6 GB card —
+    # but that is a statement about the hardware, not the service, and it was
+    # hardcoded so no deployment could say otherwise. On a shared endpoint it
+    # is also the fairness ceiling: one caller's queue stalls everyone.
+    job_concurrency: int
     artifact_root: Path
     artifact_ttl_hours: float
     oidc_issuer: str | None
@@ -78,6 +84,7 @@ def settings() -> Settings:
         marker_url=os.environ.get("PAPER_MCP_MARKER_URL", "http://127.0.0.1:8002"),
         marker_max_pages=int(os.environ.get("PAPER_MCP_MARKER_MAX_PAGES", "1")),
         max_upload_bytes=int(os.environ.get("PAPER_MCP_MAX_UPLOAD_BYTES", str(100 * 1024 * 1024))),
+        job_concurrency=max(1, int(os.environ.get("PAPER_MCP_JOB_CONCURRENCY", "1"))),
         artifact_root=Path(os.environ.get("PAPER_MCP_ARTIFACT_ROOT", "artifacts")),
         artifact_ttl_hours=float(os.environ.get("PAPER_MCP_ARTIFACT_TTL_HOURS", "24")),
         # This service is a resource server: it validates tokens against an

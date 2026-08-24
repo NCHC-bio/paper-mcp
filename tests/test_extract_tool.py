@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 from pathlib import Path
 
@@ -126,3 +127,96 @@ def test_a_truncated_pdf_is_refused_rather_than_queued() -> None:
 
     with pytest.raises(InvalidArgumentError, match="could not be opened"):
         decode_pdf(_b64(truncated), max_bytes=1024 * 1024)
+
+
+def test_job_concurrency_comes_from_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The worker count must be an operator decision on a shared endpoint.
+
+    `JobStore` has always taken a `concurrency` argument; nothing passed one,
+    so every deployment ran a single worker no matter the hardware. On a
+    shared service that is also a fairness ceiling: one caller's queue of
+    papers stalls everyone else's first page.
+    """
+    monkeypatch.setenv("PAPER_MCP_JOB_CONCURRENCY", "3")
+    monkeypatch.setattr(extract_mod, "_jobs", None)
+
+    assert extract_mod.job_store()._semaphore._value == 3
+
+
+def test_job_concurrency_defaults_to_one_because_vram_says_so(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A dense two-column page can saturate 6 GB on its own, so the safe
+    # default stays 1 — raising it is a claim about the card, not a
+    # preference.
+    monkeypatch.delenv("PAPER_MCP_JOB_CONCURRENCY", raising=False)
+    monkeypatch.setattr(extract_mod, "_jobs", None)
+
+    assert extract_mod.job_store()._semaphore._value == 1
+
+
+async def test_queued_bytes_are_spooled_to_disk_not_held_in_memory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A queue of large papers must not be a queue of large buffers.
+
+    The job closed over the uploaded bytes, so every queued extraction pinned
+    its whole PDF until a single worker reached it. With the cap at 100 MB
+    and a real library whose median paper is 10.6 MB, ten queued uploads held
+    hundreds of megabytes for no reason other than waiting. Spooling to disk
+    keeps the cost at one in-flight document.
+    """
+    captured: dict[str, object] = {}
+
+    async def _fake_build(pdf: bytes, **kwargs: object) -> object:
+        captured["seen_bytes"] = len(pdf)
+        raise RuntimeError("stop after reading")
+
+    monkeypatch.setattr(extract_mod, "build_bundle", _fake_build)
+    monkeypatch.setattr(extract_mod, "artifact_store", lambda: ArtifactStore(tmp_path))
+    monkeypatch.setattr(extract_mod, "_jobs", None)
+    # Isolate the spool: it is a real directory beside the artifact root, so
+    # a leftover from any earlier run would answer this test's glob.
+    monkeypatch.setenv("PAPER_MCP_ARTIFACT_ROOT", str(tmp_path / "artifacts"))
+
+    pdf = _real_pdf()
+    result = await extract_mod.tool_extract_pdf(_b64(pdf))
+    assert result.status == "extracting"
+
+    spool = extract_mod.spool_dir()
+    assert list(spool.glob("*.pdf")), "the upload should be on disk while queued"
+
+    # The read happens on a worker thread, so this needs real time.
+    for _ in range(200):
+        await asyncio.sleep(0.01)
+        if not list(spool.glob("*.pdf")):
+            break
+
+    # The work still receives the exact bytes, read back from the spool.
+    assert captured["seen_bytes"] == len(pdf)
+    # And the spool is cleaned up once the job is done with it.
+    assert not list(spool.glob("*.pdf")), "the spooled upload was left behind"
+
+
+def test_orphaned_spool_files_are_cleared_at_startup(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Every spool file present at boot is garbage, by construction.
+
+    Jobs live in memory, so a restart forgets them — but the uploads they were
+    waiting on stay on disk. A service restarted mid-extraction (a crash, a
+    redeploy) therefore leaks its largest files, and with a 100 MB ceiling
+    that is how a long-lived deployment fills its disk with documents nobody
+    is waiting for any more.
+    """
+    monkeypatch.setenv("PAPER_MCP_ARTIFACT_ROOT", str(tmp_path / "artifacts"))
+    spool = extract_mod.spool_dir()
+    orphan = spool / "deadbeef.pdf"
+    orphan.write_bytes(b"%PDF-1.7 left behind by a restart")
+
+    removed = extract_mod.clear_spool()
+
+    assert removed == 1
+    assert not orphan.exists()

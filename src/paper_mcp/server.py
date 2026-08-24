@@ -27,7 +27,12 @@ from paper_mcp.api.artifacts import router as artifacts_router
 from paper_mcp.api.middleware import AuthQuotaMiddleware
 from paper_mcp.config import Settings, settings
 from paper_mcp.skills import load_skills
-from paper_mcp.tools.extract import marker_client, tool_extract_pdf, tool_get_job
+from paper_mcp.tools.extract import (
+    clear_spool,
+    marker_client,
+    tool_extract_pdf,
+    tool_get_job,
+)
 
 _LOG = logging.getLogger(__name__)
 
@@ -170,6 +175,9 @@ def create_app() -> FastAPI:
         # Starlette does NOT propagate a mounted sub-app's lifespan, so the
         # session manager's task group must be entered here or the first
         # POST /mcp fails with "Task group is not initialized".
+        # Anything left in the spool belongs to a job this process has
+        # already forgotten, so it is garbage by construction.
+        clear_spool()
         async with session_manager.run():
             _LOG.info("paper-mcp %s ready; mcp mounted at %s", __version__, MCP_PATH)
             yield

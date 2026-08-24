@@ -20,6 +20,11 @@ services:
       # batch taking 21 minutes. Raise only on a bigger GPU.
       - PAPER_MCP_MARKER_MAX_PAGES=1
       - PAPER_MCP_ARTIFACT_ROOT=/app/artifacts
+      # Extractions running at once. 1 because a second concurrent dense page
+      # OOMs a 6 GB card — a statement about the hardware, not the service.
+      # On a bigger card raise it: on a shared endpoint this is also the
+      # fairness ceiling, since one caller's queue stalls everyone else.
+      - PAPER_MCP_JOB_CONCURRENCY=${PAPER_MCP_JOB_CONCURRENCY:-1}
       # Ceiling on an uploaded PDF. Part of containment (SRS NFR-02), not
       # politeness. 25 MB looked generous against arXiv preprints and was
       # wrong for published papers: over a real 44-paper library the median

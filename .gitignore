@@ -20,3 +20,4 @@ htmlcov/
 # Local verification harnesses, kept out of the repo.
 scripts/security_check.py
 scripts/authenticated_client_check.py
+spool/

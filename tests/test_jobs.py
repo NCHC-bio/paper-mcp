@@ -231,3 +231,33 @@ async def test_a_running_job_reports_the_page_it_reached() -> None:
 
     release.set()
     await _settle()
+
+
+async def test_concurrency_is_configurable_for_hardware_that_can_take_it() -> None:
+    """One worker is a GPU constraint, not a property of the service.
+
+    VRAM scales with page content density and a 6 GB card OOMs on a second
+    concurrent page, so serialising is right *here* — but it was hardcoded,
+    so a deployment with a bigger card could not use it, and every caller on
+    a shared endpoint queued behind one worker regardless.
+    """
+    store = JobStore(concurrency=2)
+    running = 0
+    peak = 0
+    release = asyncio.Event()
+
+    async def _work() -> str:
+        nonlocal running, peak
+        running += 1
+        peak = max(peak, running)
+        await release.wait()
+        running -= 1
+        return "k"
+
+    store.submit(content_key="sha256:a", run=_work)
+    store.submit(content_key="sha256:b", run=_work)
+    await _settle()
+
+    assert peak == 2, f"two workers configured, {peak} ran"
+    release.set()
+    await _settle()
