@@ -26,7 +26,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from paper_mcp import __version__, maintenance
 from paper_mcp.api.artifacts import router as artifacts_router
 from paper_mcp.api.middleware import AuthQuotaMiddleware
-from paper_mcp.config import Settings, request_body_limit, settings
+from paper_mcp.config import MCP_PATH, Settings, request_body_limit, settings
 from paper_mcp.skills import load_skills
 from paper_mcp.tools.extract import (
     clear_spool,
@@ -38,7 +38,6 @@ from paper_mcp.tools.extract import (
 _LOG = logging.getLogger(__name__)
 
 SERVER_NAME = "paper"
-MCP_PATH = "/mcp"
 
 
 def build_mcp_server() -> MCPServer[Any]:

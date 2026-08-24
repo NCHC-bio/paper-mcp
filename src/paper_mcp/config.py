@@ -7,6 +7,10 @@ from pathlib import Path
 
 _DEFAULT_ALLOWED_HOSTS = ("localhost", "localhost:8000", "127.0.0.1", "127.0.0.1:8000")
 
+# The path the MCP sub-app owns. Lives here rather than in `server` because
+# the middleware needs it too, and `server` imports the middleware.
+MCP_PATH = "/mcp"
+
 
 @dataclass(frozen=True)
 class Settings:

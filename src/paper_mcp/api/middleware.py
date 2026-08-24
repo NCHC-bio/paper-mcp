@@ -14,7 +14,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from paper_mcp.auth import AuthError, Principal, anonymous_principal, verify_token
-from paper_mcp.config import request_body_limit, settings
+from paper_mcp.config import MCP_PATH, request_body_limit, settings
 from paper_mcp.context import reset_principal, set_principal
 from paper_mcp.quota import QuotaExceededError, quota_store
 
@@ -54,6 +54,19 @@ class AuthQuotaMiddleware(BaseHTTPMiddleware):
         path = request.url.path
         if any(path.startswith(prefix) for prefix in _OPEN_PREFIXES):
             return await call_next(request)
+
+        # The SDK runs `stateless_http=True`, where — as its own comment says
+        # — it "never opens a GET stream": a fresh transport is built per
+        # request, so `GET /mcp` answered 200 text/event-stream and then held
+        # the connection open forever on a stream structurally incapable of
+        # delivering a message. A probe client sat on one past a 30 s read
+        # timeout and a 5-minute script budget, and each held stream cost a
+        # socket, a task and a quota token with nothing bounding how many
+        # accumulate. Matched on the exact path rather than on the method
+        # alone, so FastAPI's own `GET /openapi.json` still answers. DELETE
+        # already returns a clean 405; this makes GET consistent with it.
+        if path == MCP_PATH and request.method == "GET":
+            return _method_not_allowed()
 
         cfg = settings()
 
@@ -117,6 +130,20 @@ def _unauthorized(detail: str) -> JSONResponse:
         status_code=401,
         # RFC 6750: tell a compliant client how to authenticate.
         headers={"WWW-Authenticate": 'Bearer realm="paper-mcp"'},
+    )
+
+
+def _method_not_allowed() -> JSONResponse:
+    return JSONResponse(
+        {
+            "error": "method_not_allowed",
+            "detail": (
+                "this endpoint is stateless streamable-HTTP MCP: it answers POST "
+                "only. A GET stream here can never carry a message."
+            ),
+        },
+        status_code=405,
+        headers={"Allow": "POST"},
     )
 
 

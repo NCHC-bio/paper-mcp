@@ -262,3 +262,30 @@ def test_an_oversized_body_is_refused_in_json_naming_the_limit(
     assert body["error"] == "payload_too_large"
     assert str(cap) in body["detail"], "the caller must be told the actual cap"
     assert "PAPER_MCP_MAX_UPLOAD_BYTES" in body["detail"], "and how to raise it"
+
+
+def test_get_on_the_mcp_path_is_refused(_allow_testserver: None) -> None:
+    """Stateless transport never opens a GET stream, so it must not accept one.
+
+    The SDK answered 200 text/event-stream and held the connection open
+    forever on a stream that could never carry a message: a probe client sat
+    on one past a 30 s read timeout and a 5-minute script budget. Each held
+    stream costs a socket, a task and a quota token, and the call budget is a
+    rate limit, not a concurrency limit, so nothing bounded how many piled up.
+    """
+    with TestClient(create_app()) as client:
+        resp = client.get("/mcp")
+
+    assert resp.status_code == 405
+    assert resp.headers.get("allow") == "POST"
+
+
+def test_the_openapi_schema_still_answers(_allow_testserver: None) -> None:
+    """The method guard is for /mcp only, not every GET the app serves."""
+    with TestClient(create_app()) as client:
+        assert client.get("/openapi.json").status_code == 200
+
+
+def test_health_is_still_a_get(_allow_testserver: None) -> None:
+    with TestClient(create_app()) as client:
+        assert client.get("/health").status_code == 200
