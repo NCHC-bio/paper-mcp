@@ -3,8 +3,8 @@
 # Marker is a REQUIRED component, not an opt-in profile (SRS v0.2). PDF
 # extraction is the product: PaperHub shipped crude PyMuPDF extraction once,
 # measured the output as "conference-UNusable", and replaced it with Marker.
-# A host without a GPU can still serve discovery and LaTeX compilation, but a
-# PDF fetch reports `extraction_unavailable` rather than degrading silently.
+# A host without a GPU cannot serve this at all: extraction is the product,
+# so a PDF reports `extraction_unavailable` rather than degrading silently.
 services:
   paper-mcp:
     build: .
@@ -21,10 +21,12 @@ services:
       - PAPER_MCP_MARKER_MAX_PAGES=1
       - PAPER_MCP_ARTIFACT_ROOT=/app/artifacts
       # Ceiling on an uploaded PDF. Part of containment (SRS NFR-02), not
-      # politeness: the papers this serves are single-digit megabytes, so a
-      # generous cap costs nothing and refuses a file whose only purpose is
-      # to exhaust memory before it reaches the decoder.
-      - PAPER_MCP_MAX_UPLOAD_BYTES=${PAPER_MCP_MAX_UPLOAD_BYTES:-26214400}
+      # politeness. 25 MB looked generous against arXiv preprints and was
+      # wrong for published papers: over a real 44-paper library the median
+      # is 10.6 MB and the largest 67 MB, so a quarter was refused outright.
+      # This bounds memory per in-flight extraction (~2.5x the file while
+      # queued), which the per-caller quota is what really limits.
+      - PAPER_MCP_MAX_UPLOAD_BYTES=${PAPER_MCP_MAX_UPLOAD_BYTES:-104857600}
       # A public deployment MUST name its own hostname here, or every request
       # is rejected with 421 by DNS-rebinding protection.
       - PAPER_MCP_ALLOWED_HOSTS=${PAPER_MCP_ALLOWED_HOSTS:-localhost:8000,127.0.0.1:8000}
@@ -53,11 +55,10 @@ services:
     #
     # A bare `8002:8002` binds every interface — and on Linux publishes
     # straight through the host firewall — letting anyone who can route to the
-    # host POST an arbitrary PDF into the decoder, bypassing paper-mcp's auth,
-    # its quota, and its arXiv-only restriction. On loopback, the only remote
-    # path in is `fetch_paper` -> an arXiv PDF, behind a bearer token and an
-    # extraction budget. paper-mcp itself reaches Marker over the compose
-    # network (`http://marker:8002`), which this does not affect; the
+    # host POST an arbitrary PDF into the decoder, bypassing paper-mcp's auth
+    # and its quota entirely. On loopback the only route in is `extract_pdf`,
+    # behind a bearer token and an extraction budget. paper-mcp reaches Marker
+    # over the compose network (`http://marker:8002`) regardless; the
     # published port exists for the from-source dev flow.
     ports: ["127.0.0.1:8002:8002"]
     environment:

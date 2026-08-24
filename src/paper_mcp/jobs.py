@@ -95,11 +95,17 @@ class JobStore:
             self._by_key.pop(content_key, None)
             return existing
 
+        ahead = sum(1 for j in self._jobs.values() if j.state in ("queued", "running"))
         job = JobStatus(
             job_id=secrets.token_urlsafe(16),
             state="queued",
             content_key=content_key,
-            progress="queued",
+            # Depth, not just the word "queued". Work is serialized, so a
+            # caller that cannot see how much is in front of it cannot tell a
+            # busy service from a dead one — measured at 2,268 s of silence on
+            # a real run, with the GPU reading 0% because the accuracy pass is
+            # network-bound, which looks exactly like a hang.
+            progress=f"queued ({ahead} ahead)" if ahead else "queued (next)",
         )
         self._jobs[job.job_id] = job
         self._by_key[content_key] = job.job_id
@@ -110,6 +116,17 @@ class JobStore:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         return job
+
+    def report(self, job_id: str, progress: str) -> None:
+        """Record how far a running job has got.
+
+        Called from inside the work, because only the work knows. `extracting`
+        held for eighteen minutes on a real paper says nothing; pages are the
+        unit the estimate in `extract_pdf`'s own hint is quoted in.
+        """
+        job = self._jobs.get(job_id)
+        if job is not None and job.state == "running":
+            job.progress = progress
 
     async def _execute(self, job: JobStatus, run: Callable[[], Awaitable[str]]) -> None:
         async with self._semaphore:

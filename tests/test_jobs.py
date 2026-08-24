@@ -176,3 +176,58 @@ async def test_a_failed_job_is_handed_back_once_then_allows_a_retry() -> None:
     await _settle()
     assert third.job_id != first.job_id
     assert attempts == 2
+
+
+async def test_a_queued_job_reports_how_many_are_ahead_of_it() -> None:
+    """`progress: "queued"` for 37 minutes is indistinguishable from wedged.
+
+    Measured on a real corpus run: one job sat queued for 2,268 s behind
+    other work, reporting the literal string "queued" throughout, while the
+    GPU read 0% because the accuracy pass is network-bound. A caller checking
+    for liveness had every reason to conclude the service was dead. Depth is
+    the one fact that separates "busy" from "broken", and the store knows it.
+    """
+    store = JobStore()
+    release = asyncio.Event()
+
+    async def _blocked() -> str:
+        await release.wait()
+        return "k"
+
+    first = store.submit(content_key="sha256:a", run=_blocked)
+    second = store.submit(content_key="sha256:b", run=_blocked)
+    third = store.submit(content_key="sha256:c", run=_blocked)
+    await _settle()
+
+    assert store.get(first.job_id).state == "running"  # type: ignore[union-attr]
+    assert "2" in store.get(second.job_id).progress or "1" in store.get(second.job_id).progress  # type: ignore[union-attr]
+    # The third is further back than the second, and says so.
+    assert store.get(third.job_id).progress != store.get(second.job_id).progress  # type: ignore[union-attr]
+
+    release.set()
+    await _settle()
+
+
+async def test_a_running_job_reports_the_page_it_reached() -> None:
+    # "extracting" for eighteen minutes tells a caller nothing. Pages are the
+    # unit the work is actually measured in, and the one the tool's own
+    # "roughly a minute per page" estimate refers to. Observed mid-flight,
+    # because a finished job reports "complete".
+    store = JobStore()
+    reported = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _work() -> str:
+        store.report(handle.job_id, "page 12/40")
+        reported.set()
+        await release.wait()
+        return "k"
+
+    handle = store.submit(content_key="sha256:x", run=_work)
+    await _settle()
+    await reported.wait()
+
+    assert store.get(handle.job_id).progress == "page 12/40"  # type: ignore[union-attr]
+
+    release.set()
+    await _settle()

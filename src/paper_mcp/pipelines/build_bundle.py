@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import re
 import zipfile
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -123,6 +124,7 @@ async def build_bundle(
     marker: MarkerClient,
     max_pages: int = 1,
     ttl_hours: float = 24.0,
+    on_progress: Callable[[int, int], None] | None = None,
 ) -> Bundle:
     """Extract and cache a document from its bytes; return the bundle.
 
@@ -140,7 +142,7 @@ async def build_bundle(
     pages = page_count(pdf)
     logger.info("extracting %s (%d pages) via marker", key, pages)
 
-    doc = await marker.extract(pdf, max_pages=max_pages)
+    doc = await marker.extract(pdf, max_pages=max_pages, on_progress=on_progress)
 
     entry = store.ensure(key)
     markdown, figures, warnings = marker_doc_to_bundle_parts(doc, asset_dir=entry)

@@ -24,8 +24,16 @@ class _FakeMarker:
         self.doc = doc
         self.calls = 0
 
-    async def extract(self, pdf_bytes: bytes, *, max_pages: int | None = None) -> MarkerDoc:
+    async def extract(
+        self,
+        pdf_bytes: bytes,
+        *,
+        max_pages: int | None = None,
+        on_progress: object | None = None,
+    ) -> MarkerDoc:
         self.calls += 1
+        if on_progress is not None:
+            on_progress(1, 1)  # a real client reports each page batch
         return self.doc
 
 
@@ -176,7 +184,13 @@ async def test_a_marker_failure_leaves_no_cache_entry(
     # bundle.json is written last, so an interrupted run reads as a miss and
     # is retried rather than served as a truncated paper.
     class _Broken:
-        async def extract(self, pdf_bytes: bytes, *, max_pages: int | None = None) -> MarkerDoc:
+        async def extract(
+            self,
+            pdf_bytes: bytes,
+            *,
+            max_pages: int | None = None,
+            on_progress: object | None = None,
+        ) -> MarkerDoc:
             raise RuntimeError("marker died")
 
     store = ArtifactStore(tmp_path)
@@ -233,3 +247,25 @@ async def test_a_keyless_extraction_records_no_model(
     bundle = await build_bundle(_PDF, store=store, marker=_FakeMarker(_doc()))  # type: ignore[arg-type]
 
     assert bundle.extraction.llm_model is None
+
+
+async def test_page_progress_is_reported_while_extracting(
+    tmp_path: Path, _no_network: None
+) -> None:
+    """A caller polling a job must see movement, not one opaque string.
+
+    Measured on a real run: 18 minutes of `progress: "extracting"` on a
+    49-page paper, and 2,268 s of `"queued"` before that, with the GPU at 0%
+    because the accuracy pass is network-bound. Indistinguishable from a hang.
+    """
+    seen: list[tuple[int, int]] = []
+    store = ArtifactStore(tmp_path)
+
+    await build_bundle(
+        _PDF,
+        store=store,
+        marker=_FakeMarker(_doc()),  # type: ignore[arg-type]
+        on_progress=lambda done, total: seen.append((done, total)),
+    )
+
+    assert seen, "the extraction reported no progress at all"

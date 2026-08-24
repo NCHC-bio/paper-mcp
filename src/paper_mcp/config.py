@@ -26,9 +26,16 @@ class Settings:
     # default on a small card; raise it on a bigger GPU.
     marker_max_pages: int
     # Ceiling on an uploaded PDF. A bound on what reaches the decoder is part
-    # of the containment posture (SRS NFR-02), not just politeness: the papers
-    # this serves are single-digit megabytes, so a generous cap costs nothing
-    # and refuses a file whose only purpose is to exhaust memory.
+    # of the containment posture (SRS NFR-02), not just politeness — it refuses
+    # a file whose only purpose is to exhaust memory.
+    #
+    # 25 MB looked generous against arXiv preprints (0.5-2 MB) and was wrong
+    # for published papers: measured over a real 44-paper library the median
+    # is 10.6 MB and the largest is 67 MB, so a quarter of it was refused.
+    # 100 MB covers that library with headroom. Measured cost of the largest:
+    # an 89 MB JSON body accepted in 1.4 s, ~2.5x the file size held while the
+    # job is queued — so this is a ceiling on memory per in-flight extraction,
+    # which is what the per-caller quota exists to bound.
     max_upload_bytes: int
     artifact_root: Path
     artifact_ttl_hours: float
@@ -70,7 +77,7 @@ def settings() -> Settings:
         port=int(os.environ.get("PAPER_MCP_PORT", "8000")),
         marker_url=os.environ.get("PAPER_MCP_MARKER_URL", "http://127.0.0.1:8002"),
         marker_max_pages=int(os.environ.get("PAPER_MCP_MARKER_MAX_PAGES", "1")),
-        max_upload_bytes=int(os.environ.get("PAPER_MCP_MAX_UPLOAD_BYTES", str(25 * 1024 * 1024))),
+        max_upload_bytes=int(os.environ.get("PAPER_MCP_MAX_UPLOAD_BYTES", str(100 * 1024 * 1024))),
         artifact_root=Path(os.environ.get("PAPER_MCP_ARTIFACT_ROOT", "artifacts")),
         artifact_ttl_hours=float(os.environ.get("PAPER_MCP_ARTIFACT_TTL_HOURS", "24")),
         # This service is a resource server: it validates tokens against an

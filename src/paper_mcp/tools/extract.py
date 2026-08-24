@@ -113,7 +113,13 @@ async def tool_extract_pdf(content_base64: str, filename: str | None = None) -> 
             hint="Cached. markdown holds the document; figures[].image_url resolves to images.",
         )
 
+    jobs = job_store()
+
     async def run() -> str:
+        def _progress(done: int, total: int) -> None:
+            # The job handle is bound by the time any page finishes.
+            jobs.report(handle.job_id, f"extracting page {done}/{total}")
+
         bundle = await build_bundle(
             pdf,
             filename=filename,
@@ -121,12 +127,14 @@ async def tool_extract_pdf(content_base64: str, filename: str | None = None) -> 
             marker=marker_client(),
             max_pages=cfg.marker_max_pages,
             ttl_hours=cfg.artifact_ttl_hours,
+            on_progress=_progress,
         )
         return bundle.bundle_id
 
     # Keyed by content, so two callers uploading the same paper join one job
     # rather than queueing two identical GPU runs.
-    job = job_store().submit(content_key=key, run=run)
+    handle = jobs.submit(content_key=key, run=run)
+    job = handle
     if job.state == "error":
         # The store hands a previously-failed job back so the failure is seen
         # rather than silently re-queued. Reporting it as `extracting` would

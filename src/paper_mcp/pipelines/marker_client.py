@@ -12,6 +12,7 @@ as LaTeX, and an extracted figure index with captions.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -122,7 +123,20 @@ class MarkerClient:
         payload: dict[str, Any] = resp.json()
         return parse_blocks(payload)
 
-    async def extract(self, pdf_bytes: bytes, *, max_pages: int | None = None) -> MarkerDoc:
+    async def extract(
+        self,
+        pdf_bytes: bytes,
+        *,
+        max_pages: int | None = None,
+        on_progress: Callable[[int, int], None] | None = None,
+    ) -> MarkerDoc:
+        """Extract a document, optionally reporting `(done, total)` pages.
+
+        Progress is per page batch because that is the only point where this
+        knows anything: a caller polling a job otherwise sees one opaque
+        string for the whole run, which on a 49-page paper was eighteen
+        minutes of silence.
+        """
         if max_pages is None or max_pages <= 0:
             return await self._post(pdf_bytes, None)
 
@@ -135,6 +149,8 @@ class MarkerClient:
             indices = list(range(start, min(start + max_pages, pages)))
             logger.debug("marker batch pages %s of %d", indices, pages)
             merged.extend((await self._post(pdf_bytes, indices)).blocks)
+            if on_progress is not None:
+                on_progress(min(start + max_pages, pages), pages)
         return MarkerDoc(blocks=merged)
 
     async def profile(self) -> dict[str, Any]:
