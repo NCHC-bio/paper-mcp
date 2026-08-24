@@ -23,7 +23,7 @@ from paper_mcp.config import settings
 from paper_mcp.jobs import JobStatus, JobStore
 from paper_mcp.models import InvalidArgumentError, NotFoundError, UpstreamError
 from paper_mcp.pipelines.build_bundle import build_bundle, bundle_key, load_cached
-from paper_mcp.pipelines.marker_client import MarkerClient
+from paper_mcp.pipelines.marker_client import MarkerClient, page_count
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +93,26 @@ def decode_pdf(content_base64: str, *, max_bytes: int) -> bytes:
         raise InvalidArgumentError(
             "those bytes are not a PDF (no %PDF- header). This tool extracts "
             "PDFs only — decode base64 of the file itself, not of a URL or text."
+        )
+
+    # The header is not proof the file is readable. A 15-byte stub and a
+    # truncated download both carry it, both passed, and both took the single
+    # GPU slot before failing minutes later as "Marker returned HTTP 500" —
+    # which reads as "the service is broken, retry", the opposite of the
+    # truth. Opening the document costs microseconds and answers the question
+    # now, with the page count as a by-product of proving it.
+    try:
+        pages = page_count(data)
+    except Exception as exc:
+        raise InvalidArgumentError(
+            f"that PDF could not be opened ({type(exc).__name__}); it is "
+            "truncated or corrupt. Re-download it and try again — retrying "
+            "these bytes will fail the same way."
+        ) from exc
+    if pages <= 0:
+        raise InvalidArgumentError(
+            "that PDF could not be opened: it reports zero pages, so there is "
+            "nothing to extract."
         )
     return data
 
