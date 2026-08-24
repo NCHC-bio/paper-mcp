@@ -12,7 +12,7 @@ Hand it a PDF; get the full text as markdown, with real tables, LaTeX equations,
 ![Auth](https://img.shields.io/badge/auth-OIDC%20resource%20server-2A6DB2)
 ![Lint](https://img.shields.io/badge/lint-ruff-261230?logo=ruff&logoColor=white)
 ![Types](https://img.shields.io/badge/types-mypy%20--strict-2A6DB2)
-![Tests](https://img.shields.io/badge/tests-163%20unit%20%2B%207%20integration-brightgreen)
+![Tests](https://img.shields.io/badge/tests-185%20unit%20%2B%207%20integration-brightgreen)
 
 </div>
 
@@ -209,7 +209,8 @@ Environment only (twelve-factor). Nothing is read from a config file.
 | `PAPER_MCP_OIDC_ISSUER` / `PAPER_MCP_OIDC_AUDIENCE` | unset | The IdP to validate bearer tokens against. This service is a resource server: it never issues tokens |
 | `PAPER_MCP_SUBJECT_SALT` | per-process | Salt for the HMAC of `sub` used in metering and logs. The raw subject is never logged |
 | `PAPER_MCP_QUOTA_CALLS_PER_MINUTE` | `60` | Per-caller call budget |
-| `PAPER_MCP_QUOTA_EXTRACTIONS_PER_HOUR` | `20` | Per-caller GPU-extraction budget |
+| `PAPER_MCP_QUOTA_EXTRACTIONS_PER_HOUR` | `20` | Per-caller GPU-extraction budget. Charged on a cache **miss** only — a cache hit costs no GPU time, and the tool's own hint tells a caller to keep calling until the cache is warm |
+| `PAPER_MCP_TRUST_FORWARDED_FOR` | off | Whether `X-Forwarded-For` names the client. Turn it on **only** when a proxy you control is in front: in `open` mode the per-IP meter is the only brake there is, and a header the caller sets is not a rate-limit key. Left off, metering uses the peer address, which a peer cannot forge |
 | `PAPER_MCP_MARKER_URL` | `http://127.0.0.1:8002` | Marker service. **Required for extraction** — without it `extract_pdf` reports the dependency rather than degrading |
 | `PAPER_MCP_MAX_UPLOAD_BYTES` | `104857600` (100 MB) | Largest PDF accepted. Sized from a real library: median paper 10.6 MB, largest 67 MB. The transport limit is derived from this, so the two cannot disagree |
 | `PAPER_MCP_JOB_CONCURRENCY` | `1` | Extractions at once. 1 because a second concurrent dense page OOMs a 6 GB card — raise it on a bigger one. On a shared endpoint this is also the fairness ceiling |

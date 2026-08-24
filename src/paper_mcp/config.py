@@ -47,9 +47,25 @@ class Settings:
     artifact_ttl_hours: float
     oidc_issuer: str | None
     oidc_audience: str | None
+    # Whether `X-Forwarded-For` names the client. Off unless an operator
+    # says a proxy is in front: in open mode the per-IP meter is the only
+    # brake, and a header the caller controls is not a rate-limit key.
+    trust_forwarded_for: bool
     quota_calls_per_minute: float
     quota_extractions_per_hour: float
     quota_compile_seconds_per_hour: float
+
+
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+
+def _flag(name: str) -> bool:
+    """An opt-in switch. Anything not clearly affirmative stays off.
+
+    An unset compose variable arrives as an empty string, which must read
+    as "no" rather than as "the operator configured something".
+    """
+    return (os.environ.get(name) or "").strip().lower() in _TRUTHY
 
 
 def _csv(name: str, default: tuple[str, ...] = ()) -> tuple[str, ...]:
@@ -91,6 +107,7 @@ def settings() -> Settings:
         # IdP the operator brings, and never issues them.
         oidc_issuer=os.environ.get("PAPER_MCP_OIDC_ISSUER") or None,
         oidc_audience=os.environ.get("PAPER_MCP_OIDC_AUDIENCE") or None,
+        trust_forwarded_for=_flag("PAPER_MCP_TRUST_FORWARDED_FOR"),
         quota_calls_per_minute=float(os.environ.get("PAPER_MCP_QUOTA_CALLS_PER_MINUTE", "60")),
         quota_extractions_per_hour=float(
             os.environ.get("PAPER_MCP_QUOTA_EXTRACTIONS_PER_HOUR", "20")
@@ -99,3 +116,39 @@ def settings() -> Settings:
             os.environ.get("PAPER_MCP_QUOTA_COMPILE_SECONDS_PER_HOUR", "600")
         ),
     )
+
+
+# Framing around the payload: the JSON-RPC envelope, the method and tool
+# names, and a filename. A few hundred bytes in practice; 64 KiB is slack
+# bought cheaply, since the number only bounds a rejection.
+_ENVELOPE_SLACK = 64 * 1024
+
+
+def request_body_limit(max_upload_bytes: int) -> int:
+    """Transport body limit that admits a PDF at `max_upload_bytes`.
+
+    The MCP SDK defaults to 4 MiB and enforces it *before* a request reaches
+    any tool, so the app's own upload cap was unreachable dead code: 25 MiB of
+    PDF needs a 33 MiB body. Measured against a real corpus, that default
+    rejected 35 of 44 papers — as a bare `413` outside JSON-RPC, with no
+    mention of a limit, so `extract_pdf`'s carefully worded size error never
+    ran once.
+
+    Equalling the cap would not fix it. `extract_pdf` carries the file as
+    base64, which inflates by 4/3, so the body must be bigger than the file it
+    is meant to allow. Deriving it here keeps one number configurable
+    (`PAPER_MCP_MAX_UPLOAD_BYTES`).
+
+    What deriving it does **not** do is make the transport agree with the tool
+    at every size, which an earlier version of this docstring claimed. Body
+    size grows with file size, so the two only agree within `_ENVELOPE_SLACK`
+    of the cap: measured at a 20 MiB cap, cap+30 KB reached the tool and got
+    its worded error while cap+4 MB got the bare 413 again. A limit has to
+    exist, so the fix is not a bigger number — it is that `AuthQuotaMiddleware`
+    checks `Content-Length` against this and answers with a JSON error that
+    names the cap, before the SDK's unworded check ever runs.
+
+    Lives here rather than in `server` so the middleware can reach it without
+    importing the app that installs the middleware.
+    """
+    return max_upload_bytes * 4 // 3 + _ENVELOPE_SLACK

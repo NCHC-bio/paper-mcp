@@ -6,8 +6,11 @@ stubbed `verify_token`.
 """
 from __future__ import annotations
 
+import asyncio
+import base64
 import json
 import time
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -17,9 +20,17 @@ import respx
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
 
+import paper_mcp.quota as quota_mod
 from paper_mcp import auth as auth_mod
+from paper_mcp.auth import anonymous_principal
+from paper_mcp.bundle import Bundle, DocumentRef
+from paper_mcp.context import reset_principal, set_principal
 from paper_mcp.quota import QuotaExceededError, QuotaLimits, QuotaStore, reset_quota_store
 from paper_mcp.server import create_app
+
+
+def _b64_of(data: bytes) -> str:
+    return base64.b64encode(data).decode()
 
 _ISSUER = "https://idp.example.org"
 _AUDIENCE = "paper-mcp"
@@ -284,3 +295,175 @@ def test_subject_hash_does_not_expose_the_subject(monkeypatch: pytest.MonkeyPatc
     assert "user@example.com" not in digest
     assert digest == auth_mod.subject_hash("user@example.com")
     assert digest != auth_mod.subject_hash("other@example.com")
+
+
+def _extract_call(client: object, pdf: bytes) -> dict[str, object]:
+    import base64
+
+    resp = client.post(  # type: ignore[attr-defined]
+        "/mcp",
+        json={
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "extract_pdf", "arguments": {
+                "content_base64": base64.b64encode(pdf).decode(),
+            }},
+        },
+        headers={"Accept": "application/json, text/event-stream"},
+    )
+    body: dict[str, object] = resp.json()
+    return body.get("result", body)  # type: ignore[return-value]
+
+
+def _pdf(tag: str) -> bytes:
+    import pymupdf
+
+    doc = pymupdf.open()
+    doc.new_page().insert_text((72, 72), tag)
+    data: bytes = doc.tobytes()
+    doc.close()
+    return data
+
+
+def test_starting_an_extraction_charges_the_gpu_budget(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`PAPER_MCP_QUOTA_EXTRACTIONS_PER_HOUR` was never charged by anything.
+
+    The middleware consumes `"calls"` and nothing else, so the one genuinely
+    scarce resource — GPU minutes, as `quota.py`'s own docstring calls it —
+    had no meter. Measured against a running service with the limit set to 2:
+    five distinct PDFs, five accepted. On a shared endpoint with one worker
+    that is how a single caller stalls everybody else's queue, which is the
+    fairness ceiling the setting exists to be.
+
+    This is also the test that proves the caller's identity reaches the tool
+    at all: quota is per-principal, the tool sees only its arguments, and
+    `BaseHTTPMiddleware` runs the downstream app in its own task.
+    """
+    import paper_mcp.tools.extract as extract_mod
+
+    async def _never_finishes(pdf: bytes, **kwargs: object) -> object:
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(extract_mod, "build_bundle", _never_finishes)
+    monkeypatch.setenv("PAPER_MCP_ALLOWED_HOSTS", "testserver")
+    monkeypatch.setenv("PAPER_MCP_ARTIFACT_ROOT", str(tmp_path / "artifacts"))
+    monkeypatch.setenv("PAPER_MCP_QUOTA_EXTRACTIONS_PER_HOUR", "1")
+
+    with TestClient(create_app()) as client:
+        first = _extract_call(client, _pdf("first paper"))
+        second = _extract_call(client, _pdf("second paper"))
+
+    assert first.get("isError") is not True, f"the first extraction was refused: {first}"
+    assert second.get("isError") is True, "the second extraction was not metered"
+    assert "quota" in str(second).lower()
+
+
+def test_a_cached_paper_does_not_spend_the_gpu_budget(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The budget meters GPU minutes, so a cache hit must be free.
+
+    Charging on every call would make the limit a call limit under another
+    name, and would punish exactly the access pattern the content-addressed
+    cache exists to encourage — polling `extract_pdf` until it is warm, which
+    is what the tool's own hint tells a caller to do.
+    """
+    import paper_mcp.tools.extract as extract_mod
+    from paper_mcp.artifacts import ArtifactStore
+
+    store = ArtifactStore(tmp_path / "artifacts")
+    monkeypatch.setattr(extract_mod, "_store", store)
+    monkeypatch.setenv("PAPER_MCP_ARTIFACT_ROOT", str(tmp_path / "artifacts"))
+
+    quota = QuotaStore(QuotaLimits(extractions_per_hour=1.0))
+    monkeypatch.setattr(quota_mod, "_store", quota)
+
+    pdf = _pdf("a paper already extracted")
+    key = extract_mod.bundle_key(pdf)
+    entry = store.ensure(key)
+    (entry / "bundle.json").write_text(
+        Bundle(bundle_id=key, document=DocumentRef(content_sha256="x")).model_dump_json(),
+        encoding="utf-8",
+    )
+
+    principal = anonymous_principal("10.0.0.9")
+    token = set_principal(principal)
+    try:
+        for _ in range(5):
+            result = asyncio.run(extract_mod.tool_extract_pdf(_b64_of(pdf)))
+            assert result.status == "ready"
+    finally:
+        reset_principal(token)
+
+    # Never charged means no bucket was ever opened for it — which is the
+    # proof, so spell out what it buys: the single unit is still there for a
+    # real extraction, and only the second one is refused.
+    assert quota.remaining(principal.subject_hash, "extractions") == float("inf")
+    quota.consume(principal.subject_hash, "extractions")
+    with pytest.raises(QuotaExceededError):
+        quota.consume(principal.subject_hash, "extractions")
+
+
+def test_a_spoofed_forwarded_for_header_does_not_reset_the_meter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In open mode the per-IP meter is the only brake, and it was one header.
+
+    `_client_ip` trusted `X-Forwarded-For` from anyone, with no trusted-proxy
+    check — and compose publishes `8000:8000` with no proxy in front. Measured
+    against a running service with the limit at 5 calls/minute: 60 requests
+    with a rotating header, 60 accepted. The comment said the header "is set
+    by the proxy in front of a public deployment"; nothing checked that there
+    was one.
+
+    Trusting a hop that has not been declared is the bug. Default to the peer
+    address, which cannot be forged by the peer.
+    """
+    monkeypatch.setenv("PAPER_MCP_ALLOWED_HOSTS", "testserver")
+    monkeypatch.setenv("PAPER_MCP_QUOTA_CALLS_PER_MINUTE", "3")
+
+    codes = []
+    with TestClient(create_app()) as client:
+        for i in range(8):
+            resp = client.post(
+                "/mcp",
+                json={"jsonrpc": "2.0", "id": i, "method": "tools/list", "params": {}},
+                headers={
+                    "Accept": "application/json, text/event-stream",
+                    "X-Forwarded-For": f"10.9.0.{i}",
+                },
+            )
+            codes.append(resp.status_code)
+
+    assert 429 in codes, f"rotating one header defeated the rate limit: {codes}"
+
+
+def test_a_declared_proxy_deployment_still_meters_each_client_separately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Behind a real proxy the peer address is the proxy, for everyone.
+
+    Ignoring `X-Forwarded-For` unconditionally would meter every caller
+    against one bucket, so one busy client would rate-limit the rest. An
+    operator who has actually put a proxy in front says so, and then the
+    header is the client.
+    """
+    monkeypatch.setenv("PAPER_MCP_ALLOWED_HOSTS", "testserver")
+    monkeypatch.setenv("PAPER_MCP_QUOTA_CALLS_PER_MINUTE", "3")
+    monkeypatch.setenv("PAPER_MCP_TRUST_FORWARDED_FOR", "1")
+
+    codes = []
+    with TestClient(create_app()) as client:
+        for i in range(8):
+            resp = client.post(
+                "/mcp",
+                json={"jsonrpc": "2.0", "id": i, "method": "tools/list", "params": {}},
+                headers={
+                    "Accept": "application/json, text/event-stream",
+                    "X-Forwarded-For": f"10.9.0.{i}",
+                },
+            )
+            codes.append(resp.status_code)
+
+    assert codes == [200] * 8, f"a declared proxy must meter per client: {codes}"

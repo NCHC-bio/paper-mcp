@@ -217,3 +217,48 @@ def test_the_app_hands_the_transport_our_configured_limit(
     create_app()
 
     assert seen["max_request_body_size"] == server_mod.request_body_limit(9 * 1024 * 1024)
+
+
+def test_an_oversized_body_is_refused_in_json_naming_the_limit(
+    _allow_testserver: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A body over the transport limit must still answer like this service.
+
+    `request_body_limit` is documented as keeping "the transport in agreement
+    with the tool". It only manages that within ~48 KB of the cap: the body
+    grows 4/3 with the file, so anything meaningfully larger trips the SDK's
+    own check and gets `413 Request body too large` — bare text, outside
+    JSON-RPC, naming no limit. Measured at a 20 MB cap: cap+30 KB reached the
+    tool and got its worded error; cap+4 MB and cap+43 MB both got the bare
+    413. That is the exact failure `request_body_limit` was written to fix,
+    still reachable for any caller who sends a genuinely large PDF.
+
+    The limit itself has to exist. What has to change is that hitting it
+    tells the caller what the limit is and what to do about it.
+    """
+    import json
+
+    cap = 1024 * 1024
+    monkeypatch.setenv("PAPER_MCP_MAX_UPLOAD_BYTES", str(cap))
+
+    oversized = "A" * (server_mod.request_body_limit(cap) + 1024)
+    envelope = json.dumps({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "extract_pdf", "arguments": {"content_base64": oversized}},
+    })
+
+    with TestClient(create_app()) as client:
+        resp = client.post(
+            "/mcp",
+            content=envelope,
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+            },
+        )
+
+    assert resp.status_code == 413
+    body = resp.json()
+    assert body["error"] == "payload_too_large"
+    assert str(cap) in body["detail"], "the caller must be told the actual cap"
+    assert "PAPER_MCP_MAX_UPLOAD_BYTES" in body["detail"], "and how to raise it"
