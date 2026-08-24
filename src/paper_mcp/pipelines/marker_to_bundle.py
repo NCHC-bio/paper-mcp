@@ -23,6 +23,7 @@ import binascii
 import html
 import logging
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from paper_mcp.bundle import FigureRef
@@ -85,6 +86,34 @@ def unescape_fully(text: str) -> str:
             return text
         text = resolved
     return text
+
+
+@dataclass
+class _PendingTable:
+    """Cell accounting for the table currently being closed over."""
+
+    rendered: int
+    found: int
+    name: str
+
+
+# Blocks that legitimately interleave a table's own cell run. A real page ran
+# `Table -> Reference -> TableCell x55`, so an interrupting block must not end
+# the tally — but prose must, or cells from a later table accrue to this one
+# and a complete 2x5 table gets reported as "10 of 177 cells found".
+_CELL_RUN_KINDS = frozenset({"TableCell", "Reference", "Caption", "Footnote"})
+
+
+def _table_name(table_markdown: str) -> str:
+    """A table's header row, as a label a caller can locate it by.
+
+    Warnings that name no table are unactionable: reading one meant
+    reimplementing this module's private cell counting to work out which of
+    thirteen tables was meant.
+    """
+    first = next((line for line in table_markdown.splitlines() if line.strip().startswith("|")), "")
+    cells = [c.strip() for c in first.strip().strip("|").split("|") if c.strip()]
+    return " | ".join(cells)[:60] if cells else "(unnamed)"
 
 
 def _rendered_cell_count(table_markdown: str) -> int:
@@ -189,18 +218,42 @@ def marker_doc_to_bundle_parts(
     # rendered table still carries them; when the render collapses columns,
     # those blocks are the sole surviving copy and dropping them loses the
     # data outright. Compare, and say so.
-    pending_table: list[int] | None = None
+    pending_table: _PendingTable | None = None
 
     def _close_pending_table() -> None:
+        """Report a table whose rendered cell count disagrees with Marker's.
+
+        Both directions matter, and they mean opposite things:
+
+        * `found > rendered` — cells were dropped. The table is incomplete.
+        * `rendered > found` — cells were *invented* as padding, which is the
+          signature of a row that lost a spanning label and shifted left. The
+          count is intact, so counting alone cannot see it; only the direction
+          can. Measured on SEDD Table 1, where every value moved one column
+          and a perplexity of 50.92 read as 41.84.
+
+        With no `TableCell` blocks there is no ground truth, so nothing is
+        claimed — silence beats a guess.
+        """
         nonlocal pending_table
         if pending_table is None:
             return
-        rendered, found = pending_table
+        rendered, found, name = pending_table.rendered, pending_table.found, pending_table.name
         pending_table = None
+        if found == 0:
+            return
         if found > rendered:
             warnings.append(
-                f"table rendered {rendered} of the {found} cells Marker found; "
-                f"{found - rendered} were dropped — treat this table as incomplete"
+                f"table {name!r} rendered {rendered} of the {found} cells Marker "
+                f"found; {found - rendered} were dropped — treat this table as "
+                "incomplete"
+            )
+        elif rendered > found:
+            warnings.append(
+                f"table {name!r} rendered {rendered} cells from the {found} Marker "
+                f"found, so {rendered - found} were padded — a row lost a cell and "
+                "its values are probably shifted; treat the column alignment as "
+                "unreliable"
             )
 
     # Computed up front: a crop can arrive before the figure containing it,
@@ -209,6 +262,10 @@ def marker_doc_to_bundle_parts(
 
     for position, block in enumerate(doc.blocks):
         kind = block.block_type
+
+        # Anything that is not part of a table's own cell run ends the tally.
+        if pending_table is not None and kind not in _CELL_RUN_KINDS:
+            _close_pending_table()
 
         if position in crops:
             continue  # a panel of a figure indexed in full elsewhere
@@ -264,7 +321,11 @@ def marker_doc_to_bundle_parts(
             table = html_table_to_markdown(block.html)
             if table:
                 parts.append(f"\n\n{table}\n")
-                pending_table = [_rendered_cell_count(table), 0]
+                pending_table = _PendingTable(
+                    rendered=_rendered_cell_count(table),
+                    found=0,
+                    name=_table_name(table),
+                )
             else:
                 # Falling back to stripped text would produce the cell-blob
                 # this pipeline exists to avoid, so flag it instead.
@@ -276,7 +337,7 @@ def marker_doc_to_bundle_parts(
 
         if kind == "TableCell":
             if pending_table is not None:
-                pending_table[1] += 1
+                pending_table.found += 1
             # Already rendered. Marker's flatten appends a block and then
             # recurses into its children, so every cell of the Table above
             # arrives again as its own record — and the Table's own html

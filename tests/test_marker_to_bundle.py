@@ -475,3 +475,122 @@ def test_a_genuinely_broken_table_still_warns(tmp_path: Path) -> None:
     _md, _f, warnings = marker_doc_to_bundle_parts(doc, asset_dir=tmp_path)
 
     assert any("table" in w.lower() for w in warnings)
+
+
+def test_cells_belonging_to_a_later_table_are_not_charged_to_this_one(
+    tmp_path: Path,
+) -> None:
+    """Cell accounting must not accumulate across unrelated blocks.
+
+    Closing the tally only when the next `Table` arrives let every TableCell
+    in between accrue to the previous table. Measured on a real paper: a
+    complete 2x5 table was reported as "rendered 10 of the 177 cells Marker
+    found" — a false alarm on the one table in that document a reader could
+    actually trust, while genuinely broken tables stayed silent.
+
+    Prose ends a table's cell run. An interleaved Reference or Caption does
+    not (real pages emit `Table -> Reference -> TableCell...`).
+    """
+    doc = _doc(
+        MarkerBlock(
+            block_type="Table",
+            html="<table><tbody><tr><th>A</th><th>B</th></tr>"
+                 "<tr><td>1</td><td>2</td></tr></tbody></table>",
+        ),
+        MarkerBlock(block_type="Reference", html="<span/>"),
+        MarkerBlock(block_type="TableCell", html="<th>A</th>"),
+        MarkerBlock(block_type="TableCell", html="<th>B</th>"),
+        MarkerBlock(block_type="TableCell", html="<td>1</td>"),
+        MarkerBlock(block_type="TableCell", html="<td>2</td>"),
+        # Prose closes the run. Everything after belongs to something else.
+        MarkerBlock(block_type="Text", html="<p>Discussion of the results.</p>"),
+        *[MarkerBlock(block_type="TableCell", html="<td>x</td>") for _ in range(40)],
+    )
+
+    _md, _f, warnings = marker_doc_to_bundle_parts(doc, asset_dir=tmp_path)
+
+    assert warnings == [], f"the complete table must not be flagged: {warnings}"
+
+
+def test_a_padded_row_is_reported_as_misaligned(tmp_path: Path) -> None:
+    """The dominant real failure preserves total cell count, so counting alone
+    cannot see it — but the direction of the mismatch can.
+
+    Marker emits a spanning row-label only on its first row. Later rows lose
+    it, every value shifts one column left, and the renderer pads the row back
+    out to the header width. Verified on SEDD Table 1, where "SEDD Absorb"
+    landed under `Size` and its LAMBADA perplexity read 41.84 when the truth
+    was 50.92 — a plausible number, silently wrong.
+
+    Marker's own `TableCell` blocks are the ground truth for how many cells
+    existed. Padding invents cells, so `rendered > found`. That direction is
+    what distinguishes an invented blank from a genuinely empty cell, which is
+    common and must not be flagged (Transformer Table 2 has real blanks where
+    a model reports no EN-FR score).
+    """
+    doc = _doc(
+        MarkerBlock(
+            block_type="Table",
+            html=(
+                "<table><tbody>"
+                "<tr><th>Size</th><th>Model</th><th>LAMBADA</th></tr>"
+                "<tr><td>Small</td><td>GPT-2</td><td>45.04</td></tr>"
+                "<tr><td>SEDD</td><td>50.92</td></tr>"
+                "</tbody></table>"
+            ),
+        ),
+        # Ground truth: 3 + 3 + 2 = 8 real cells. The render pads to 9.
+        *[MarkerBlock(block_type="TableCell", html=f"<td>{i}</td>") for i in range(8)],
+    )
+
+    _md, _f, warnings = marker_doc_to_bundle_parts(doc, asset_dir=tmp_path)
+
+    joined = " ".join(warnings)
+    assert warnings, "a padded row must be reported"
+    assert "align" in joined.lower(), joined
+    # Names the table so a caller can act without reimplementing our internals.
+    assert "Size" in joined or "LAMBADA" in joined, joined
+
+
+def test_a_genuinely_empty_cell_is_not_reported_as_misaligned(tmp_path: Path) -> None:
+    # Real tables have real blanks. Transformer Table 2 leaves EN-FR empty for
+    # models that never reported it; flagging those would train a caller to
+    # ignore the warning, which is how a guard becomes worse than none.
+    doc = _doc(
+        MarkerBlock(
+            block_type="Table",
+            html=(
+                "<table><tbody>"
+                "<tr><th>Model</th><th>EN-DE</th><th>EN-FR</th></tr>"
+                "<tr><td>ByteNet</td><td>23.75</td><td></td></tr>"
+                "</tbody></table>"
+            ),
+        ),
+        # Marker saw the empty cell too, so nothing was invented.
+        *[MarkerBlock(block_type="TableCell", html="<td/>") for _ in range(6)],
+    )
+
+    _md, _f, warnings = marker_doc_to_bundle_parts(doc, asset_dir=tmp_path)
+
+    assert warnings == []
+
+
+def test_a_fully_populated_table_is_not_flagged_as_misaligned(tmp_path: Path) -> None:
+    # The guard must stay quiet on good tables, or it teaches callers to
+    # ignore it — which is how a warning becomes worse than none at all.
+    doc = _doc(
+        MarkerBlock(
+            block_type="Table",
+            html=(
+                "<table><tbody>"
+                "<tr><th>Model</th><th>BLEU</th></tr>"
+                "<tr><td>Base</td><td>27.3</td></tr>"
+                "<tr><td>Big</td><td>28.4</td></tr>"
+                "</tbody></table>"
+            ),
+        ),
+    )
+
+    _md, _f, warnings = marker_doc_to_bundle_parts(doc, asset_dir=tmp_path)
+
+    assert warnings == []
