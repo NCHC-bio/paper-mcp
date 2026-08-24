@@ -88,6 +88,31 @@ def _register_skills(server: MCPServer[Any]) -> None:
         server.prompt(name=name, description=description or None)(make())
 
 
+# Framing around the payload: the JSON-RPC envelope, the method and tool
+# names, and a filename. A few hundred bytes in practice; 64 KiB is slack
+# bought cheaply, since the number only bounds a rejection.
+_ENVELOPE_SLACK = 64 * 1024
+
+
+def request_body_limit(max_upload_bytes: int) -> int:
+    """Transport body limit that admits a PDF at `max_upload_bytes`.
+
+    The MCP SDK defaults to 4 MiB and enforces it *before* a request reaches
+    any tool, so the app's own upload cap was unreachable dead code: 25 MiB of
+    PDF needs a 33 MiB body. Measured against a real corpus, that default
+    rejected 35 of 44 papers — as a bare `413` outside JSON-RPC, with no
+    mention of a limit, so `extract_pdf`'s carefully worded size error never
+    ran once.
+
+    Equalling the cap would not fix it. `extract_pdf` carries the file as
+    base64, which inflates by 4/3, so the body must be bigger than the file it
+    is meant to allow. Deriving it here keeps one number configurable
+    (`PAPER_MCP_MAX_UPLOAD_BYTES`) and the transport in agreement with the
+    tool, which is what went wrong.
+    """
+    return max_upload_bytes * 4 // 3 + _ENVELOPE_SLACK
+
+
 def transport_security(cfg: Settings) -> TransportSecuritySettings:
     """Build DNS-rebinding protection from configured allowed hosts.
 
@@ -132,6 +157,9 @@ def create_app() -> FastAPI:
         streamable_http_path=MCP_PATH,
         json_response=True,
         stateless_http=True,
+        # Without this the SDK's 4 MiB default silently governs and the
+        # configured upload cap can never be reached (see request_body_limit).
+        max_request_body_size=request_body_limit(settings().max_upload_bytes),
         transport_security=transport_security(settings()),
     )
     # `session_manager` is only valid AFTER streamable_http_app() has built it.

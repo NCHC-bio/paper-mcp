@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import pytest
 from fastapi.testclient import TestClient
+from mcp.server.mcpserver import MCPServer
 
+import paper_mcp.server as server_mod
 from paper_mcp.config import settings
 from paper_mcp.server import build_mcp_server, create_app, transport_security
 
@@ -164,3 +166,54 @@ def test_stdlib_log_level_accepts_lowercase(configured: str, expected_name: str)
     from paper_mcp.server import stdlib_log_level
 
     assert stdlib_log_level(configured) == getattr(_logging, expected_name)
+
+
+def test_request_body_limit_admits_a_pdf_at_the_configured_cap() -> None:
+    """The transport limit must exceed the upload cap, not equal it.
+
+    `extract_pdf` carries the PDF as base64 inside a JSON-RPC envelope, so a
+    file at the cap arrives as roughly 4/3 its size plus framing. Setting the
+    body limit equal to the cap would reject files the tool advertises as
+    acceptable — and reject them at the transport, as a bare 413 outside
+    JSON-RPC, where the tool's typed error never runs.
+    """
+    import base64
+    import json
+
+    cap = 25 * 1024 * 1024
+    limit = server_mod.request_body_limit(cap)
+
+    at_cap = b"%PDF-1.7" + b"0" * (cap - 8)
+    envelope = json.dumps({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "extract_pdf", "arguments": {
+            "content_base64": base64.b64encode(at_cap).decode(),
+            "filename": "a-real-papers-name.pdf",
+        }},
+    })
+
+    assert len(envelope.encode()) <= limit, (
+        f"a {cap}-byte PDF encodes to {len(envelope.encode())} bytes of body, "
+        f"over the {limit}-byte transport limit"
+    )
+
+
+def test_the_app_hands_the_transport_our_configured_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The SDK defaults to 4 MiB and applies it silently. Measured against a
+    # real corpus that rejected 35 of 44 papers, as a 413 with no JSON-RPC
+    # error and no mention of a limit anywhere.
+    seen: dict[str, object] = {}
+    original = MCPServer.streamable_http_app
+
+    def _capture(self: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        seen.update(kwargs)
+        return original(self, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(MCPServer, "streamable_http_app", _capture)
+    monkeypatch.setenv("PAPER_MCP_MAX_UPLOAD_BYTES", str(9 * 1024 * 1024))
+
+    create_app()
+
+    assert seen["max_request_body_size"] == server_mod.request_body_limit(9 * 1024 * 1024)
