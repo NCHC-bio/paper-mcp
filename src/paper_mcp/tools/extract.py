@@ -219,12 +219,21 @@ async def tool_extract_pdf(content_base64: str, filename: str | None = None) -> 
             hint="Cached. markdown holds the document; figures[].image_url resolves to images.",
         )
 
-    # Past this point the call is going to cost GPU time, so this is where
-    # the extraction budget is spent — after the cache has been consulted and
-    # before any work is queued.
-    charge_extraction()
-
     jobs = job_store()
+
+    # Charged for starting work, not for asking. A cache miss is not the same
+    # as a GPU minute: `extract_pdf`'s own hint tells a caller to call again
+    # until the cache is warm, and every one of those calls misses until the
+    # job finishes — so billing the miss would bill a caller repeatedly for
+    # one extraction and burn an hour's allowance in seconds. Callers that
+    # coalesce onto one job are one GPU run between them, and a call handed a
+    # failure to report starts nothing at all.
+    #
+    # `submit` decides this from the same incumbent, and does not await, so
+    # reading it here cannot disagree with what happens below.
+    incumbent = jobs.for_key(key)
+    if incumbent is None or incumbent.state == "done":
+        charge_extraction()
 
     # Spooled rather than closed over. A queued job that holds its upload in
     # memory turns a queue of large papers into a queue of large buffers: with
@@ -259,7 +268,6 @@ async def tool_extract_pdf(content_base64: str, filename: str | None = None) -> 
 
     # Keyed by content, so two callers uploading the same paper join one job
     # rather than queueing two identical GPU runs.
-    incumbent = jobs.for_key(key)
     handle = jobs.submit(content_key=key, run=run)
     job = handle
     if incumbent is not None and job.job_id == incumbent.job_id:

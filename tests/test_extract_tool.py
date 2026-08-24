@@ -323,3 +323,50 @@ async def test_being_handed_a_failed_job_leaves_nothing_in_the_spool(
 
     spooled = list(extract_mod.spool_dir().glob("*.pdf"))
     assert not spooled, f"the failure report left the upload behind: {spooled}"
+
+
+async def test_polling_while_a_job_runs_does_not_spend_the_gpu_budget(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`extract_pdf`'s own hint tells a caller to call again until it is warm.
+
+    Every one of those calls is a cache miss until the job finishes, so
+    charging the budget on a miss bills a caller repeatedly for a single
+    extraction — and the budget meters GPU minutes, of which a call that
+    joins an in-flight job spends none. A caller following the documented
+    advice would exhaust an hour's allowance in seconds.
+
+    The same applies to callers who coalesce onto one job: eight clients
+    sharing one GPU run are one GPU run.
+    """
+    from paper_mcp.auth import anonymous_principal
+    from paper_mcp.context import reset_principal, set_principal
+    from paper_mcp.quota import QuotaLimits, QuotaStore
+
+    release = asyncio.Event()
+
+    async def _blocking_build(pdf: bytes, **kwargs: object) -> object:
+        await release.wait()
+        raise RuntimeError("never completes during this test")
+
+    monkeypatch.setattr(extract_mod, "build_bundle", _blocking_build)
+    monkeypatch.setattr(extract_mod, "artifact_store", lambda: ArtifactStore(tmp_path))
+    monkeypatch.setattr(extract_mod, "_jobs", None)
+    monkeypatch.setenv("PAPER_MCP_ARTIFACT_ROOT", str(tmp_path / "artifacts"))
+
+    quota = QuotaStore(QuotaLimits(extractions_per_hour=2.0))
+    monkeypatch.setattr("paper_mcp.quota._store", quota)
+
+    principal = anonymous_principal("10.0.0.5")
+    bound = set_principal(principal)
+    try:
+        pdf = _real_pdf()
+        for _ in range(6):
+            result = await extract_mod.tool_extract_pdf(_b64(pdf))
+            assert result.status == "extracting"
+    finally:
+        reset_principal(bound)
+        release.set()
+
+    # One job was started, so exactly one unit is gone.
+    assert quota.remaining(principal.subject_hash, "extractions") == 1.0
