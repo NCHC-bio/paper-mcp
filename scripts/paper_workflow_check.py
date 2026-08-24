@@ -165,10 +165,18 @@ async def run(pdf_path: str, base: str) -> None:
 
         table_lines = _TABLE_RE.findall(markdown)
         has_sep = any(_TABLE_SEP_RE.match(ln) for ln in markdown.splitlines())
+        # Pipes and a separator row are not evidence a table is correct: a
+        # table truncated to its header's width has both, and passed this
+        # check while a whole column was missing. The service already counts
+        # rendered cells against the cells Marker found; judge on that.
+        dropped = [
+            w for w in (bundle["extraction"].get("warnings") or []) if "were dropped" in w
+        ]
         record(
-            "PASS" if (table_lines and has_sep) else "FAIL",
+            "PASS" if (table_lines and has_sep and not dropped) else "FAIL",
             "tables survived as markdown tables",
-            f"{len(table_lines)} table rows, separator={'yes' if has_sep else 'NO'}",
+            f"{len(table_lines)} table rows, separator={'yes' if has_sep else 'NO'}, "
+            f"{len(dropped)} table(s) lost cells",
         )
 
         record(

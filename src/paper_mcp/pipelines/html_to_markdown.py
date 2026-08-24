@@ -75,8 +75,8 @@ def _clean_cell(text: str) -> str:
 def html_table_to_markdown(table_html: str) -> str:
     """Convert a `<table>` fragment to a markdown table.
 
-    Tolerates missing `<thead>`/`<tbody>`, ragged rows (padded or truncated to
-    the header's column count), empty cells, and `<br>`. Returns an empty
+    Tolerates missing `<thead>`/`<tbody>`, ragged rows (padded to the widest
+    row's column count), empty cells, and `<br>`. Returns an empty
     string when the fragment has no rows, so a caller can fall back rather
     than emit a broken table.
     """
@@ -90,15 +90,23 @@ def html_table_to_markdown(table_html: str) -> str:
 
     header_idx = parser.header_row_index if parser.header_row_index is not None else 0
     header = rows[header_idx]
-    ncols = len(header)
+    # Width is the widest row, not the header's. Marker emits two-level
+    # headers — a 3-cell header row above a 4-cell sub-header and 5-cell data
+    # rows — and taking the header's width silently truncated every data row
+    # to it. Measured on Table 2 of arXiv 1706.03762: 36 of 55 cells survived,
+    # the training-cost column disappeared entirely, and the EN-FR BLEU score
+    # was left sitting under the "Training Cost (FLOPs)" heading, where an
+    # agent reads it as a FLOP count. Widening changes nothing on a
+    # well-formed table — Table 3 of the same paper: 252 of 252 either way.
+    ncols = max(len(row) for row in rows)
     if ncols == 0:
         return ""
 
     def fit(row: list[str]) -> list[str]:
-        # A markdown table has a fixed column count driven by its header.
-        trimmed = list(row[:ncols])
-        trimmed += [""] * (ncols - len(trimmed))
-        return trimmed
+        # Pad, never truncate. A short row lost a spanning label and its blanks
+        # are visibly blank; a truncated row lost data nothing can recover, and
+        # the caller is never told which columns went.
+        return list(row) + [""] * (ncols - len(row))
 
     lines = [
         "| " + " | ".join(fit(header)) + " |",
