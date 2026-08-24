@@ -30,3 +30,32 @@ def gemini_model() -> str:
     to the default rather than ask Gemini for a model named "".
     """
     return (os.environ.get(_ENV_VAR) or "").strip() or DEFAULT_GEMINI_MODEL
+
+
+_FALSEY = frozenset({"0", "false", "no", "off"})
+
+
+def ocr_disabled() -> bool:
+    """Whether to trust the PDF's text layer instead of re-reading the page.
+
+    True by default, and that default is a hardware constraint rather than a
+    preference. Marker flags a dense two-column page for Surya's line
+    RECOGNITION pass, which measured ~5.9 GB and crashes a 6 GB card; with
+    OCR disabled `provider_lines_good` is set for every page, so recognition
+    is skipped while line detection, layout analysis and the
+    figure/equation/table processors all still run.
+
+    The cost is real and worth naming: the embedded text layer of a
+    LaTeX-produced PDF encodes maths through Type1 font tables, so an
+    integral arrives as the character `R`, a product as `Q`, and epsilon
+    disappears — degrading prose to "we can train it to predict ." while
+    display equations, which carry their own LaTeX, stay perfect. Inline
+    maths is therefore unreliable in this mode and spot-checking equations
+    will not reveal it.
+
+    On a card with room to spare, `MARKER_DISABLE_OCR=0` buys correct inline
+    maths at the price of that VRAM. An unset compose variable arrives as an
+    empty string and must keep the safe default.
+    """
+    raw = (os.environ.get("MARKER_DISABLE_OCR") or "").strip().lower()
+    return raw not in _FALSEY if raw else True

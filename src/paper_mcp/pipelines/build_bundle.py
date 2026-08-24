@@ -56,6 +56,12 @@ def _llm_model(profile: dict[str, Any]) -> str | None:
     return model if isinstance(model, str) and model else None
 
 
+def _text_source(profile: dict[str, Any]) -> str | None:
+    """Whether Marker read the page or trusted the PDF's text layer."""
+    value = profile.get("text_source")
+    return value if isinstance(value, str) and value else None
+
+
 def derived_title(markdown: str) -> str | None:
     """The first heading, or None. Explicitly a guess (SRS §III-3).
 
@@ -143,6 +149,7 @@ async def build_bundle(
     logger.info("extracting %s (%d pages) via marker", key, pages)
 
     doc = await marker.extract(pdf, max_pages=max_pages, on_progress=on_progress)
+    profile = await _profile(marker)
 
     entry = store.ensure(key)
     markdown, figures, warnings = marker_doc_to_bundle_parts(doc, asset_dir=entry)
@@ -171,7 +178,8 @@ async def build_bundle(
             engine="marker",
             pages=pages,
             warnings=warnings,
-            llm_model=_llm_model(await _profile(marker)),
+            llm_model=_llm_model(profile),
+            text_source=_text_source(profile),
         ),
         artifact=ArtifactRef(
             bytes=zip_bytes,

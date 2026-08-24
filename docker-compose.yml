@@ -72,6 +72,15 @@ services:
       # Marker logged a warning, returned 200, and the pass silently stopped
       # running. Empty falls back to the pinned default in llm_config.py.
       - MARKER_GEMINI_MODEL=${MARKER_GEMINI_MODEL:-}
+      # Trust the PDF's own text layer instead of re-reading the page.
+      # The default (1) is a hardware constraint: Surya's recognition pass on
+      # a dense two-column page measured ~5.9 GB and crashes a 6 GB card.
+      # It costs correct inline maths — the embedded layer encodes symbols
+      # through Type1 font tables, so an integral arrives as "R" and epsilon
+      # vanishes, while display equations stay perfect and hide the damage.
+      # On a bigger card set 0 to buy correct maths with VRAM. Each bundle
+      # records which mode produced it in `extraction.text_source`.
+      - MARKER_DISABLE_OCR=${MARKER_DISABLE_OCR:-1}
       - MARKER_MAX_PAGES=1
     volumes:
       # ~2 GB of Surya weights download once and persist across image

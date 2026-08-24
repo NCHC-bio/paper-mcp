@@ -61,6 +61,13 @@ class ExtractionInfo(BaseModel):
     # measurably worse. The bundle looks complete either way, so naming the
     # model is what makes a stale entry visible rather than merely wrong.
     llm_model: str | None = None
+    # Where the text came from. "pdf-layer" trusts the document's own text,
+    # which is fast and exact for prose but routes maths through Type1 font
+    # encodings — an integral arrives as "R", epsilon disappears — while
+    # display equations stay perfect, so the damage is invisible to a spot
+    # check. "ocr" re-reads the page and costs VRAM. Recorded because a
+    # caller quoting inline maths needs to know which it got.
+    text_source: str | None = None
 
 
 class ArtifactRef(BaseModel):

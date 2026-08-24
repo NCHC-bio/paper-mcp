@@ -58,3 +58,37 @@ def test_a_blank_env_override_falls_back_to_the_default(
     module = _load()
 
     assert module.gemini_model() == module.DEFAULT_GEMINI_MODEL
+
+
+def test_ocr_is_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Trusting the PDF text layer is the safe default, not a free one.
+
+    Marker re-OCRs a dense two-column page through Surya's recognition pass,
+    which measured ~5.9 GB and crashes a 6 GB card — so the text layer is
+    trusted instead. The cost is that maths comes back through Type1 font
+    encodings: an integral sign arrives as the character `R`, a product as
+    `Q`, and epsilon vanishes, degrading prose to "we can train it to
+    predict ." while display equations stay perfect, so spot-checking hides
+    it.
+
+    That is the right default on small hardware and the wrong one on a big
+    card, which makes it a deployment choice rather than a constant.
+    """
+    monkeypatch.delenv("MARKER_DISABLE_OCR", raising=False)
+
+    assert _load().ocr_disabled() is True
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("0", False), ("false", False), ("FALSE", False), ("no", False),
+     ("1", True), ("true", True), ("", True), ("  ", True)],
+)
+def test_ocr_can_be_enabled_on_hardware_that_can_afford_it(
+    monkeypatch: pytest.MonkeyPatch, value: str, expected: bool
+) -> None:
+    # An unset compose variable arrives as "", which must keep the safe
+    # default rather than being read as "false".
+    monkeypatch.setenv("MARKER_DISABLE_OCR", value)
+
+    assert _load().ocr_disabled() is expected
