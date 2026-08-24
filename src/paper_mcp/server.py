@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 from collections.abc import AsyncGenerator
@@ -22,10 +23,10 @@ from fastapi import FastAPI
 from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 
-from paper_mcp import __version__
+from paper_mcp import __version__, maintenance
 from paper_mcp.api.artifacts import router as artifacts_router
 from paper_mcp.api.middleware import AuthQuotaMiddleware
-from paper_mcp.config import Settings, settings
+from paper_mcp.config import Settings, request_body_limit, settings
 from paper_mcp.skills import load_skills
 from paper_mcp.tools.extract import (
     clear_spool,
@@ -93,31 +94,6 @@ def _register_skills(server: MCPServer[Any]) -> None:
         server.prompt(name=name, description=description or None)(make())
 
 
-# Framing around the payload: the JSON-RPC envelope, the method and tool
-# names, and a filename. A few hundred bytes in practice; 64 KiB is slack
-# bought cheaply, since the number only bounds a rejection.
-_ENVELOPE_SLACK = 64 * 1024
-
-
-def request_body_limit(max_upload_bytes: int) -> int:
-    """Transport body limit that admits a PDF at `max_upload_bytes`.
-
-    The MCP SDK defaults to 4 MiB and enforces it *before* a request reaches
-    any tool, so the app's own upload cap was unreachable dead code: 25 MiB of
-    PDF needs a 33 MiB body. Measured against a real corpus, that default
-    rejected 35 of 44 papers — as a bare `413` outside JSON-RPC, with no
-    mention of a limit, so `extract_pdf`'s carefully worded size error never
-    ran once.
-
-    Equalling the cap would not fix it. `extract_pdf` carries the file as
-    base64, which inflates by 4/3, so the body must be bigger than the file it
-    is meant to allow. Deriving it here keeps one number configurable
-    (`PAPER_MCP_MAX_UPLOAD_BYTES`) and the transport in agreement with the
-    tool, which is what went wrong.
-    """
-    return max_upload_bytes * 4 // 3 + _ENVELOPE_SLACK
-
-
 def transport_security(cfg: Settings) -> TransportSecuritySettings:
     """Build DNS-rebinding protection from configured allowed hosts.
 
@@ -178,9 +154,24 @@ def create_app() -> FastAPI:
         # Anything left in the spool belongs to a job this process has
         # already forgotten, so it is garbage by construction.
         clear_spool()
-        async with session_manager.run():
-            _LOG.info("paper-mcp %s ready; mcp mounted at %s", __version__, MCP_PATH)
-            yield
+        # The artifact TTL and every bundle's `expires_at` were promises with
+        # nothing behind them: both sweep methods existed and neither had a
+        # caller. This is that caller.
+        interval = maintenance.sweep_interval_seconds(settings().artifact_ttl_hours)
+        sweep_task = asyncio.create_task(maintenance.sweeper(interval))
+        try:
+            async with session_manager.run():
+                _LOG.info(
+                    "paper-mcp %s ready; mcp mounted at %s; sweeping every %.0fs",
+                    __version__,
+                    MCP_PATH,
+                    interval,
+                )
+                yield
+        finally:
+            sweep_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await sweep_task
 
     app = FastAPI(title="paper-mcp", version=__version__, lifespan=lifespan)
 
