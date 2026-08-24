@@ -120,7 +120,20 @@ services:
       # Marker writes scratch files per extraction; a read-only root needs
       # somewhere for them, sized so a decompression bomb fills a tmpfs
       # rather than the host disk.
-      - /tmp:size=2g
+      #
+      # `exec` is required, not incidental. torch 2.13 dispatches through
+      # Triton, which JIT-compiles a CUDA module on first inference and then
+      # dlopen()s what it just wrote; Docker mounts tmpfs `noexec` by default,
+      # so without this the compile succeeds and the load fails with "failed
+      # to map segment from shared object" — at the first extraction, after
+      # /health has already reported ok.
+      #
+      # It does mean one writable+executable location inside the sandbox.
+      # That is inherent to a JIT, and it is bounded: 2 GB, wiped on restart,
+      # inside a container with no capabilities and a read-only root. Pinning
+      # torch below 2.13 would remove the whole class — both this and the C
+      # toolchain the JIT needs — at the cost of overriding the lockfile.
+      - /tmp:size=2g,exec
     mem_limit: 8g
     pids_limit: 512
     restart: unless-stopped

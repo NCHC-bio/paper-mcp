@@ -13,13 +13,23 @@ FROM python:3.11-slim
 # its models come from datalab S3 (s3://...) via S3DownloaderMixin, which caches
 # into surya `settings.MODEL_CACHE_DIR` (default ~/.cache/datalab/models, NOT
 # HF_HOME). Point it inside /models so the marker-models volume persists the
+# Caches that must land somewhere writable. Under the hardened runtime the
+# root filesystem is read-only, and any library that quietly caches into
+# $HOME takes the service down at the first extraction while /health still
+# reports ok: torch 2.13 dispatches through Triton, which JIT-compiles
+# kernels into ~/.triton on first inference. /tmp is a sized tmpfs in
+# compose, so the writes stay inside the sandbox.
 # ~2 GB of weights across container recreates — otherwise every rebuild/recreate
 # re-downloads them. HF_HOME/TORCH_HOME cover the few HF/torch-hosted artifacts.
 ENV PYTHONUNBUFFERED=1 \
     UV_SYSTEM_PYTHON=1 \
     HF_HOME=/models \
     TORCH_HOME=/models/torch \
-    MODEL_CACHE_DIR=/models/datalab
+    MODEL_CACHE_DIR=/models/datalab \
+    TRITON_CACHE_DIR=/tmp/triton \
+    XDG_CACHE_HOME=/tmp/cache \
+    MPLCONFIGDIR=/tmp/mpl \
+    HOME=/tmp
 
 WORKDIR /app
 
@@ -53,6 +63,15 @@ COPY pyproject.toml .
 # (Hence no UV_NO_CACHE.) --system installs into the base image's python.
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system -r pyproject.toml
+
+# Bake in the font Marker fetches on first use. `download_font()` runs when a
+# converter is constructed and writes into site-packages — which a read-only
+# root refuses, so the container came up healthy and then failed every
+# extraction with "Read-only file system: .../static". It is a no-op once the
+# file exists, so doing it here makes the hardened runtime work and removes a
+# network fetch from the first extraction, which a no-egress deployment could
+# not have satisfied either.
+RUN python -c "from marker.util import download_font; download_font()"
 
 COPY app.py llm_config.py ./
 
