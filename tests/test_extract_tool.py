@@ -431,3 +431,66 @@ def test_the_spool_honours_its_own_setting(
 
     monkeypatch.setenv("PAPER_MCP_SPOOL_DIR", str(tmp_path / "elsewhere"))
     assert extract_mod.spool_dir() == tmp_path / "elsewhere"
+
+
+async def test_an_unreachable_marker_is_reported_as_transient(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Marker being down is the commonest outage and it IS transient.
+
+    Telling an agent that a repeat failure is "the document, not a transient
+    fault" makes it abandon a perfectly good PDF over a container that is
+    still booting.
+    """
+    from paper_mcp.jobs import JobStatus
+
+    class _Store:
+        _failed = JobStatus(
+            job_id="dead",
+            state="error",
+            content_key="sha256:x",
+            error="UpstreamError: Marker is unreachable at http://marker:8002: ConnectError",
+        )
+
+        def for_key(self, content_key: str) -> JobStatus:
+            return self._failed
+
+        def submit(self, *, content_key: str, run: object) -> JobStatus:
+            return self._failed
+
+    monkeypatch.setattr(extract_mod, "job_store", lambda: _Store())
+    monkeypatch.setattr(extract_mod, "artifact_store", lambda: ArtifactStore(tmp_path))
+
+    with pytest.raises(UpstreamError) as excinfo:
+        await extract_mod.tool_extract_pdf(_b64(_PDF))
+
+    message = str(excinfo.value)
+    assert "transient" in message
+    assert "not a transient fault" not in message
+
+
+async def test_a_document_failure_still_says_not_to_retry_forever(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A failure that is not an upstream outage keeps the original advice."""
+    from paper_mcp.jobs import JobStatus
+
+    class _Store:
+        _failed = JobStatus(
+            job_id="dead",
+            state="error",
+            content_key="sha256:x",
+            error="ValueError: no extractable content",
+        )
+
+        def for_key(self, content_key: str) -> JobStatus:
+            return self._failed
+
+        def submit(self, *, content_key: str, run: object) -> JobStatus:
+            return self._failed
+
+    monkeypatch.setattr(extract_mod, "job_store", lambda: _Store())
+    monkeypatch.setattr(extract_mod, "artifact_store", lambda: ArtifactStore(tmp_path))
+
+    with pytest.raises(UpstreamError, match="not a transient fault"):
+        await extract_mod.tool_extract_pdf(_b64(_PDF))

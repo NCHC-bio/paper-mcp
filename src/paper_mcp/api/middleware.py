@@ -8,6 +8,7 @@ credential.
 from __future__ import annotations
 
 import logging
+import math
 
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
@@ -175,7 +176,10 @@ def _too_many(exc: QuotaExceededError) -> JSONResponse:
             "retry_after": round(exc.retry_after, 1),
         },
         status_code=429,
-        headers={"Retry-After": str(max(1, int(exc.retry_after)))},
+        # Ceil, matching the message the body carries: `int()` here and
+        # `:.0f` there disagreed on a sub-second wait, so the body said
+        # "retry in 0s" while this header said 1.
+        headers={"Retry-After": str(max(1, math.ceil(exc.retry_after)))},
     )
 
 

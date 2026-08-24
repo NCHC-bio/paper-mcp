@@ -310,10 +310,21 @@ async def tool_extract_pdf(content_base64: str, filename: str | None = None) -> 
         # keep it invisible: the hint below says call again, so a caller would
         # loop on a dead job forever. The store has already released the key,
         # so calling again genuinely retries.
-        raise UpstreamError(
-            f"extraction of these bytes failed: {job.error or 'unknown error'}. "
-            "Calling extract_pdf again retries it; a repeat failure is the "
+        #
+        # Which advice depends on what failed. `UpstreamError` is Marker
+        # unreachable or erroring — the commonest outage there is, and
+        # precisely a transient fault. Telling an agent otherwise makes it
+        # abandon a perfectly good PDF over a container that is still booting.
+        transient = (job.error or "").startswith("UpstreamError:")
+        advice = (
+            "Marker is the extraction engine and it was unreachable or failing, "
+            "which is transient: check /health, then call extract_pdf again."
+            if transient
+            else "Calling extract_pdf again retries it; a repeat failure is the "
             "document, not a transient fault."
+        )
+        raise UpstreamError(
+            f"extraction of these bytes failed: {job.error or 'unknown error'}. {advice}"
         )
     return ExtractResult(
         status="extracting",

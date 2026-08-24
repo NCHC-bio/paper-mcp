@@ -18,6 +18,7 @@ trade than a Redis dependency for a single-host service (SRS §II-6).
 from __future__ import annotations
 
 import logging
+import math
 import time
 from dataclasses import dataclass
 from typing import Literal
@@ -54,8 +55,11 @@ class QuotaLimits:
 
 class QuotaExceededError(Exception):
     def __init__(self, resource: str, retry_after: float) -> None:
+        # Rounded up, not to nearest. `:.0f` turned a 0.4 s wait into "retry
+        # in 0s" while the `Retry-After` header on the same response said 1 —
+        # so the body invited a retry the header had already refused.
         super().__init__(
-            f"quota exceeded for {resource}; retry in {retry_after:.0f}s"
+            f"quota exceeded for {resource}; retry in {math.ceil(retry_after)}s"
         )
         self.resource = resource
         self.retry_after = retry_after

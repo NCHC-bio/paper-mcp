@@ -564,3 +564,20 @@ def test_a_large_body_costs_more_call_budget_than_a_poll() -> None:
     assert call_cost(86 * 1024 * 1024) > 10
     # Monotonic, so a bigger body never costs less.
     assert call_cost(50 * 1024 * 1024) < call_cost(100 * 1024 * 1024)
+
+
+def test_the_retry_message_and_header_agree() -> None:
+    """A body saying "retry in 0s" invites a retry the header already refuses."""
+    from paper_mcp.api.middleware import _too_many
+
+    exc = QuotaExceededError("calls", 0.4)
+    resp = _too_many(exc)
+
+    assert "retry in 1s" in str(exc)
+    assert resp.headers["Retry-After"] == "1"
+
+
+def test_retry_advice_always_rounds_up() -> None:
+    """Rounding down tells a caller to come back before the bucket refills."""
+    assert "retry in 2s" in str(QuotaExceededError("calls", 1.2))
+    assert "retry in 126s" in str(QuotaExceededError("extractions", 125.4))
