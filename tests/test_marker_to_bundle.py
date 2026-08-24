@@ -81,7 +81,8 @@ def test_figures_are_extracted_indexed_and_captioned(tmp_path: Path) -> None:
     assert len(figures) == 1
     assert figures[0].id == "fig-001"
     assert figures[0].caption == "The Transformer architecture."
-    assert figures[0].page == 3
+    # Marker's index 3 is the fourth page: it counts from zero, the index does not.
+    assert figures[0].page == 4
     # The image is on disk, so the index entry is a promise that holds.
     assert (tmp_path / figures[0].image_path).is_file()
     # And it is referenced inline, where the surrounding prose explains it.
@@ -646,3 +647,47 @@ def test_an_undamaged_table_does_not_litter_the_bundle(tmp_path: Path) -> None:
 
     assert warnings == []
     assert not (tmp_path / "tables").exists()
+
+
+def test_a_figure_on_the_first_page_is_reported_as_page_one(tmp_path: Path) -> None:
+    """Marker counts pages from zero; a citation does not.
+
+    `MarkerBlock.page` is parsed out of Marker's block id — `/page/0/Figure/4`
+    is the first page — and the mapper passed it straight through. A live
+    3-page extraction returned figures on pages `0, 1, 2`, so an agent citing
+    "figure 1, page 0" is repeating an off-by-one its tool handed it. The
+    README's own example shows `"page": 3`, and every human convention agrees
+    with the README.
+
+    The suite missed it because every existing case constructs
+    `MarkerBlock(page=3)` directly, asserting the number survives the mapper
+    rather than that it means what a reader thinks it means.
+    """
+    doc = _doc(
+        MarkerBlock(
+            block_type="Figure",
+            images={"img0": _PNG},
+            caption="On the very first page.",
+            page=0,
+            block_id="/page/0/Figure/4",
+        )
+    )
+
+    _markdown, figures, _w = marker_doc_to_bundle_parts(doc, asset_dir=tmp_path)
+
+    assert figures[0].page == 1, "a figure on the first page must not be page 0"
+
+
+def test_a_figure_with_no_page_stays_unknown_rather_than_becoming_page_one(
+    tmp_path: Path,
+) -> None:
+    """Absent is not zero. Renumbering `None` would invent a location."""
+    doc = _doc(
+        MarkerBlock(
+            block_type="Figure", images={"img0": _PNG}, caption="Nowhere in particular."
+        )
+    )
+
+    _markdown, figures, _w = marker_doc_to_bundle_parts(doc, asset_dir=tmp_path)
+
+    assert figures[0].page is None

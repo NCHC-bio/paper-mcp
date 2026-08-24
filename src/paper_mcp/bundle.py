@@ -44,7 +44,10 @@ class FigureRef(BaseModel):
 
     id: str
     caption: str = ""
-    page: int | None = None
+    page: int | None = Field(
+        default=None,
+        description="1-based page number, as a reader would cite it; None if unknown.",
+    )
     image_path: str = Field(description="Path inside the bundle zip, e.g. figures/fig-001.png")
     image_url: str | None = None
 

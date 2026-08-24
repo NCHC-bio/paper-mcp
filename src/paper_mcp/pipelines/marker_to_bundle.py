@@ -185,6 +185,20 @@ def suppressed_figures(blocks: list[MarkerBlock]) -> set[int]:
     return drop
 
 
+def one_based_page(page: int | None) -> int | None:
+    """Marker's page index as a page number a reader would recognise.
+
+    `MarkerBlock.page` is parsed out of the block id, and Marker counts from
+    zero — `/page/0/Figure/4` is the first page. Passing that through made
+    every figure in the index off by one: a real 3-page extraction reported
+    pages `0, 1, 2`, so an agent citing a figure repeated the error as fact.
+
+    `None` stays `None`. A figure whose page could not be determined has no
+    location, and turning that into "page 1" would invent one.
+    """
+    return None if page is None else page + 1
+
+
 def strip_html(fragment: str) -> str:
     """Plain text from a non-table HTML fragment, entities resolved."""
     text = _TAG_RE.sub(" ", fragment or "")
@@ -323,7 +337,7 @@ def marker_doc_to_bundle_parts(
                 FigureRef(
                     id=fid,
                     caption=caption,
-                    page=block.page,
+                    page=one_based_page(block.page),
                     image_path=f"figures/{name}",
                 )
             )
