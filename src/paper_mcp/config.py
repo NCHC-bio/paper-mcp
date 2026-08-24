@@ -11,8 +11,6 @@ _DEFAULT_ALLOWED_HOSTS = ("localhost", "localhost:8000", "127.0.0.1", "127.0.0.1
 @dataclass(frozen=True)
 class Settings:
     auth_mode: str
-    unpaywall_email: str | None
-    s2_api_key: str | None
     public_base_url: str
     log_level: str
     allowed_hosts: tuple[str, ...]
@@ -53,7 +51,6 @@ class Settings:
     trust_forwarded_for: bool
     quota_calls_per_minute: float
     quota_extractions_per_hour: float
-    quota_compile_seconds_per_hour: float
 
 
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
@@ -83,8 +80,6 @@ def settings() -> Settings:
     """
     return Settings(
         auth_mode=os.environ.get("PAPER_MCP_AUTH_MODE", "open"),
-        unpaywall_email=os.environ.get("PAPER_MCP_UNPAYWALL_EMAIL") or None,
-        s2_api_key=os.environ.get("PAPER_MCP_S2_API_KEY") or None,
         public_base_url=os.environ.get("PAPER_MCP_PUBLIC_BASE_URL", "http://localhost:8000"),
         log_level=os.environ.get("PAPER_MCP_LOG_LEVEL", "INFO"),
         # DNS-rebinding protection. A public deployment MUST set this to its
@@ -111,9 +106,6 @@ def settings() -> Settings:
         quota_calls_per_minute=float(os.environ.get("PAPER_MCP_QUOTA_CALLS_PER_MINUTE", "60")),
         quota_extractions_per_hour=float(
             os.environ.get("PAPER_MCP_QUOTA_EXTRACTIONS_PER_HOUR", "20")
-        ),
-        quota_compile_seconds_per_hour=float(
-            os.environ.get("PAPER_MCP_QUOTA_COMPILE_SECONDS_PER_HOUR", "600")
         ),
     )
 

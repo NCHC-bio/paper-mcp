@@ -4,13 +4,13 @@ With no per-user data, one caller cannot read another's anything — but they
 share a GPU, a CPU and an outbound API budget, so one caller absolutely can
 starve the rest. That is what quota is for (SRS FR-09).
 
-Three resources, because they are scarce in different ways:
+Two resources, because they are scarce in different ways:
 
 * **calls/minute** — cheap and bursty; stops a hot loop.
 * **extractions/hour** — GPU minutes, the genuinely expensive one.
-* **compile-seconds/hour** — CPU, metered by time actually spent rather than
-  by call count, since one pathological document costs far more than ten
-  ordinary ones.
+
+A third bucket metered compile-seconds for caller-supplied LaTeX. Compilation
+went out of scope in v1.0 and nothing has charged it since.
 
 Buckets live in memory. A restart forgives one window, which is a better
 trade than a Redis dependency for a single-host service (SRS §II-6).
@@ -24,7 +24,7 @@ from typing import Literal
 
 logger = logging.getLogger(__name__)
 
-Resource = Literal["calls", "extractions", "compile_seconds"]
+Resource = Literal["calls", "extractions"]
 
 
 @dataclass
@@ -50,7 +50,6 @@ class _Bucket:
 class QuotaLimits:
     calls_per_minute: float = 60.0
     extractions_per_hour: float = 20.0
-    compile_seconds_per_hour: float = 600.0
 
 
 class QuotaExceededError(Exception):
@@ -78,10 +77,6 @@ class QuotaStore:
                 "extractions": (
                     self.limits.extractions_per_hour,
                     self.limits.extractions_per_hour / 3600.0,
-                ),
-                "compile_seconds": (
-                    self.limits.compile_seconds_per_hour,
-                    self.limits.compile_seconds_per_hour / 3600.0,
                 ),
             }[resource]
             # Start full: a caller's first request should not be throttled.
@@ -123,7 +118,6 @@ def quota_store() -> QuotaStore:
             QuotaLimits(
                 calls_per_minute=cfg.quota_calls_per_minute,
                 extractions_per_hour=cfg.quota_extractions_per_hour,
-                compile_seconds_per_hour=cfg.quota_compile_seconds_per_hour,
             )
         )
     return _store

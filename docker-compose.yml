@@ -93,7 +93,6 @@ services:
       # On a bigger card set 0 to buy correct maths with VRAM. Each bundle
       # records which mode produced it in `extraction.text_source`.
       - MARKER_DISABLE_OCR=${MARKER_DISABLE_OCR:-1}
-      - MARKER_MAX_PAGES=1
     volumes:
       # ~2 GB of Surya weights download once and persist across image
       # rebuilds; without this every rebuild re-downloads them.

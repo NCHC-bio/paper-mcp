@@ -1,69 +1,41 @@
-import pytest
+"""The error contract every tool returns against.
+
+The rest of this file tested `PaperRef`, `normalize_paper_id`, `s2_path_id`
+and `clamp_max_results` — all of which belonged to the discovery tools
+removed in v1.0. Those tests passed, which is exactly why the dead code
+looked alive for a whole release.
+"""
+from __future__ import annotations
 
 from paper_mcp.models import (
     InvalidArgumentError,
-    OpenAccess,
-    PaperRef,
-    clamp_max_results,
-    normalize_paper_id,
-    s2_path_id,
+    NotFoundError,
+    RateLimitedError,
+    ToolError,
+    UpstreamError,
 )
 
 
-def test_arxiv_id_is_preferred_identifier() -> None:
-    # arXiv wins because it is the identifier with an ingestible source.
-    assert normalize_paper_id(arxiv_id="1706.03762", s2_id="abc123", doi="10.5555/x") == (
-        "arxiv:1706.03762"
-    )
-
-
-def test_falls_back_to_s2_then_doi() -> None:
-    assert normalize_paper_id(arxiv_id=None, s2_id="abc123", doi="10.5555/x") == "ss:abc123"
-    assert normalize_paper_id(arxiv_id=None, s2_id=None, doi="10.5555/x") == "doi:10.5555/x"
-
-
-def test_no_identifier_at_all_is_an_error() -> None:
-    with pytest.raises(InvalidArgumentError):
-        normalize_paper_id(arxiv_id=None, s2_id=None, doi=None)
-
-
-def test_s2_path_id_maps_each_prefix_to_upstream_form() -> None:
-    assert s2_path_id("arxiv:1706.03762") == "arXiv:1706.03762"
-    assert s2_path_id("ss:abc123") == "abc123"
-    assert s2_path_id("doi:10.5555/x") == "DOI:10.5555/x"
-
-
-def test_s2_path_id_rejects_unknown_prefix() -> None:
-    with pytest.raises(InvalidArgumentError):
-        s2_path_id("pubmed:12345")
-
-
-def test_s2_path_id_rejects_unprefixed_id() -> None:
-    with pytest.raises(InvalidArgumentError):
-        s2_path_id("1706.03762")
-
-
-@pytest.mark.parametrize(("given", "expected"), [(0, 1), (-5, 1), (8, 8), (50, 50), (999, 50)])
-def test_max_results_is_clamped(given: int, expected: int) -> None:
-    assert clamp_max_results(given) == expected
-
-
-def test_paper_ref_defaults_open_access_to_unavailable() -> None:
-    ref = PaperRef(
-        paper_id="arxiv:1706.03762",
-        title="Attention Is All You Need",
-        authors=["Ashish Vaswani"],
-        source="arxiv",
-    )
-    assert ref.open_access == OpenAccess(available=False)
-    assert ref.abstract is None
-
-
 def test_tool_errors_carry_a_code_and_optional_retry_after() -> None:
-    from paper_mcp.models import RateLimitedError
-
     err = RateLimitedError("slow down", retry_after=7.0)
 
     assert err.code == "rate_limited"
     assert err.retry_after == 7.0
     assert str(err) == "slow down"
+
+
+def test_every_error_is_a_tool_error_with_its_own_code() -> None:
+    """A caller branches on `code`, so the codes must stay distinct.
+
+    Each names a different mistake and a different next step: fix the
+    argument, stop asking for a thing that is not there, retry the upstream,
+    or wait. Collapsing two of them would tell a caller to do the wrong one.
+    """
+    errors = [InvalidArgumentError, NotFoundError, UpstreamError, RateLimitedError]
+
+    assert all(issubclass(e, ToolError) for e in errors)
+    assert len({e.code for e in errors}) == len(errors)
+
+
+def test_retry_after_is_absent_unless_the_error_knows_one() -> None:
+    assert UpstreamError("marker is unreachable").retry_after is None

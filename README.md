@@ -12,7 +12,7 @@ Hand it a PDF; get the full text as markdown, with real tables, LaTeX equations,
 ![Auth](https://img.shields.io/badge/auth-OIDC%20resource%20server-2A6DB2)
 ![Lint](https://img.shields.io/badge/lint-ruff-261230?logo=ruff&logoColor=white)
 ![Types](https://img.shields.io/badge/types-mypy%20--strict-2A6DB2)
-![Tests](https://img.shields.io/badge/tests-185%20unit%20%2B%207%20integration-brightgreen)
+![Tests](https://img.shields.io/badge/tests-176%20unit%20%2B%207%20integration-brightgreen)
 
 </div>
 
@@ -94,7 +94,7 @@ curl -s http://127.0.0.1:8000/health
 The first extraction downloads ~2 GB of Surya weights into a named volume, so a rebuild never re-pays for them. The service image itself carries no TeX distribution and no jail — with LaTeX out of scope there is nothing here that executes caller-supplied code.
 
 > [!NOTE]
-> **GPU strongly recommended.** Marker runs on CPU but far too slowly to be useful. `MARKER_MAX_PAGES=1` bounds VRAM per call — VRAM scales with page *content density*, not page count, and one dense two-column page can saturate 6 GB. Raise it only on a bigger GPU.
+> **GPU strongly recommended.** Marker runs on CPU but far too slowly to be useful. `PAPER_MCP_MARKER_MAX_PAGES=1` bounds VRAM per call — VRAM scales with page *content density*, not page count, and one dense two-column page can saturate 6 GB. Raise it only on a bigger GPU.
 
 > [!IMPORTANT]
 > The default `AUTH_MODE=open` means **every caller is unauthenticated**. Before exposing this anywhere, set the OIDC variables and your own hostname in `PAPER_MCP_ALLOWED_HOSTS` — see [Configuration](#️-configuration).

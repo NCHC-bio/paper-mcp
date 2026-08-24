@@ -244,17 +244,6 @@ def test_expensive_resources_are_metered_separately() -> None:
         store.consume("s", "extractions", now=0.0)
 
 
-def test_compile_seconds_are_charged_by_duration() -> None:
-    # One pathological document costs more than ten ordinary ones, so the
-    # meter is time rather than call count.
-    store = QuotaStore(QuotaLimits(compile_seconds_per_hour=100.0))
-
-    store.consume("s", "compile_seconds", amount=90.0, now=0.0)
-
-    with pytest.raises(QuotaExceededError):
-        store.consume("s", "compile_seconds", amount=20.0, now=0.0)
-
-
 @respx.mock
 def test_over_quota_returns_429_with_retry_after(secured: None, keypair: Any) -> None:
     respx.get(_JWKS_URL).mock(return_value=httpx.Response(200, json=_jwks(keypair)))
