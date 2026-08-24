@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import os
 import re
-import tempfile
 from typing import Any
 
 from fastapi import FastAPI, File, Form, UploadFile
@@ -42,6 +41,7 @@ from marker.config.parser import ConfigParser
 from marker.converters.pdf import PdfConverter
 from marker.models import create_model_dict
 from marker.renderers.markdown import MarkdownRenderer
+from pipeline import extract_document
 
 app = FastAPI(title="paperhub-marker")
 
@@ -242,16 +242,15 @@ def health() -> dict[str, Any]:
     }
 
 
-@app.post("/extract")
-async def extract(
-    file: UploadFile = File(...),
-    page_range: str | None = Form(default=None),
-) -> dict[str, Any]:
-    data = await file.read()
-    pages = _parse_page_range(page_range)
-    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tf:
-        tf.write(data)
-        path = tf.name
+def _render(path: str, pages: list[int] | None) -> dict[str, Any]:
+    """Convert one PDF at `path` into the flatten contract. Synchronous.
+
+    Every model call lives in here, which is why `extract_document` runs it on
+    a worker thread: as an `async def` inline it held the event loop for the
+    whole extraction, and this service stopped answering `/health` while it
+    worked. paper-mcp's own health check has a 5 s timeout, so it reported
+    Marker as down for exactly as long as Marker was busy.
+    """
     converter = _converter(pages)
     # Build the Document ONCE (layout/line builders + every processor run here),
     # then render it twice — no double model inference.
@@ -281,3 +280,24 @@ async def extract(
     markdown: str = getattr(markdown_output, "markdown", "") or ""
 
     return {"markdown": markdown, "blocks": blocks}
+
+
+# Module-level singletons rather than calls in the signature: FastAPI reads
+# these once at import, and calling them per-request is what ruff B008 flags.
+_FILE = File(...)
+_PAGE_RANGE = Form(default=None)
+
+
+@app.post("/extract")
+async def extract(
+    file: UploadFile = _FILE,
+    page_range: str | None = _PAGE_RANGE,
+) -> dict[str, Any]:
+    data = await file.read()
+    pages = _parse_page_range(page_range)
+    # Owns the scratch file's whole lifetime and runs the render off the event
+    # loop. Both used to live inline here, and both were wrong: the temp file
+    # was created with `delete=False` and never removed — pages x filesize
+    # leaked per extraction, against a 2 GB tmpfs — and the render blocked the
+    # loop. See marker_service/pipeline.py.
+    return await extract_document(data, build=lambda path: _render(path, pages))

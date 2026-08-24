@@ -31,6 +31,26 @@ ENV PYTHONUNBUFFERED=1 \
     MPLCONFIGDIR=/tmp/mpl \
     HOME=/tmp
 
+# Where a model DOWNLOAD is staged — not where a request's scratch file goes.
+# surya's `download_directory` pulls an entire model into a
+# `tempfile.TemporaryDirectory()` and only then moves it into MODEL_CACHE_DIR,
+# so TMPDIR is where ~2 GB of weights land on a cold cache. Left at /tmp that
+# is the 2 GB tmpfs: measured on a real first run at 1.2 GB used for ONE
+# 1.35 GB model while /models still held 12 KB. Several download on first use,
+# so a larger one exhausts the tmpfs and the first extraction dies of ENOSPC
+# — with /health reporting ok throughout, which is the failure mode this
+# image keeps producing. /models is the persistent volume: disk rather than
+# RAM, and already sized for the weights it ends up holding anyway.
+#
+# MARKER_SCRATCH_DIR keeps the request's own PDF in the tmpfs, which is what
+# that size limit exists to contain. Caller-supplied bytes must not follow
+# TMPDIR onto the volume.
+ENV TMPDIR=/models/tmp MARKER_SCRATCH_DIR=/tmp
+# Build-time only: a runtime volume mount hides everything under /models,
+# which is why the CMD creates it again. This one keeps any build step
+# that reaches for a temp file from landing on a TMPDIR that is not there.
+RUN mkdir -p /models/tmp
+
 WORKDIR /app
 
 # Runtime libs marker/opencv (surya) need, plus a C compiler.
@@ -73,7 +93,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # not have satisfied either.
 RUN python -c "from marker.util import download_font; download_font()"
 
-COPY app.py llm_config.py ./
+COPY app.py llm_config.py pipeline.py ./
 
 # Models are NOT baked into the image — they download ONCE into the /models
 # named volume (see docker-compose.yml) on first /extract and persist across
@@ -81,4 +101,6 @@ COPY app.py llm_config.py ./
 # re-downloads the Surya/marker weights. (MODEL_CACHE_DIR=/models/datalab holds
 # the datalab S3 weights; HF_HOME/TORCH_HOME cover HF/torch-hosted artifacts.)
 EXPOSE 8002
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8002"]
+# TMPDIR lives on the models volume, which is empty on a fresh deployment,
+# so it has to be created at start-up rather than baked into the image.
+CMD ["sh", "-c", "mkdir -p \"$TMPDIR\" \"$MARKER_SCRATCH_DIR\" && exec uvicorn app:app --host 0.0.0.0 --port 8002"]
