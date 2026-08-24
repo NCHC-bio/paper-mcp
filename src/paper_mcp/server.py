@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from typing import Any
 
 import uvicorn
@@ -171,7 +171,7 @@ def create_app() -> FastAPI:
     session_manager = server.session_manager
 
     @contextlib.asynccontextmanager
-    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
         # Starlette does NOT propagate a mounted sub-app's lifespan, so the
         # session manager's task group must be entered here or the first
         # POST /mcp fails with "Task group is not initialized".
