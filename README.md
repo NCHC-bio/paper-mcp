@@ -4,16 +4,15 @@
 
 **Ready-to-use tools that give an LLM agent a paper it can actually work with.**
 
-The full text as markdown · every figure indexed with its caption · a sandboxed LaTeX compiler — served over MCP, stateless, multi-user.
+Hand it a PDF; get the full text as markdown, with real tables, LaTeX equations, and every figure indexed by its caption. Served over MCP, stateless, multi-user.
 
 ![Python](https://img.shields.io/badge/python-3.13-3776AB?logo=python&logoColor=white)
 ![MCP](https://img.shields.io/badge/MCP-Streamable%20HTTP-000000)
 ![Extraction](https://img.shields.io/badge/extraction-Marker%20(GPU)-FF6F00)
-![Sandbox](https://img.shields.io/badge/sandbox-nsjail%20%2B%20TeX%20Live-4B275F)
 ![Auth](https://img.shields.io/badge/auth-OIDC%20resource%20server-2A6DB2)
 ![Lint](https://img.shields.io/badge/lint-ruff-261230?logo=ruff&logoColor=white)
 ![Types](https://img.shields.io/badge/types-mypy%20--strict-2A6DB2)
-![Tests](https://img.shields.io/badge/tests-199%20unit%20%2B%207%20integration-brightgreen)
+![Tests](https://img.shields.io/badge/tests-163%20unit%20%2B%207%20integration-brightgreen)
 
 </div>
 
@@ -29,17 +28,18 @@ This is *data-processing functionality*, not an agent. Pipelines built on top �
 
 | Tool | What it does | Network scope |
 | --- | --- | --- |
-| `search_arxiv` | Search arXiv by relevance. Metadata only — nothing is downloaded | `arxiv.org` |
-| `search_papers` | Search Semantic Scholar's full corpus — broader than arXiv, with venues and citation counts | `api.semanticscholar.org` |
-| `find_related` | Citations, references, or recommendations for a paper | `api.semanticscholar.org` |
-| `resolve_paper` | Turn an arXiv id, DOI, `ss:` id, or a free-text title into one normalized reference — and say where an open-access copy lives | arXiv · S2 · Unpaywall |
-| **`fetch_paper`** | **The product.** PDF → markdown + figure index, content-addressed and cached. Returns a job handle while the GPU works | arXiv + Marker |
-| `get_job` | Poll an extraction | — |
-| `compile_latex` | Compile caller-supplied LaTeX in a jail and return structured errors. A **tool, not a flow** — it never loops, revises, or authors | none (denied in-jail) |
+| **`extract_pdf`** | **The product.** Your PDF → markdown + a figure index, content-addressed and cached. Returns a job handle while the GPU works | **none** — you supply the bytes |
+| `get_job` | Poll an extraction: queue depth while waiting, page reached while running | — |
+
+That is the whole surface. Discovery, paper fetching and LaTeX compilation
+were removed in v1.0: an agent already has better ways to find and download a
+paper than this service had, and the search endpoints it offered never worked
+reliably without a paid API key. What remains is the part an agent cannot do
+for itself.
 
 ## 📦 What you get
 
-`fetch_paper("arxiv:1706.03762")` returns the paper as markdown —
+`extract_pdf(content_base64=…)` returns the paper as markdown —
 
 ```markdown
 ## Introduction
@@ -87,11 +87,11 @@ There is no low-fidelity fallback engine. PaperHub shipped crude PyMuPDF extract
 git clone https://github.com/whats2000/paper-mcp.git
 cd paper-mcp
 
-docker compose up -d --build      # paper-mcp on :8000, Marker on :8002
+docker compose up -d --build      # paper-mcp on :8000, Marker on :8002 (loopback)
 curl -s http://127.0.0.1:8000/health
 ```
 
-The first build downloads TeX Live and ~2 GB of Surya weights; both persist in named volumes, so a rebuild never re-pays for them.
+The first extraction downloads ~2 GB of Surya weights into a named volume, so a rebuild never re-pays for them. The service image itself carries no TeX distribution and no jail — with LaTeX out of scope there is nothing here that executes caller-supplied code.
 
 > [!NOTE]
 > **GPU strongly recommended.** Marker runs on CPU but far too slowly to be useful. `MARKER_MAX_PAGES=1` bounds VRAM per call — VRAM scales with page *content density*, not page count, and one dense two-column page can saturate 6 GB. Raise it only on a bigger GPU.
@@ -135,11 +135,11 @@ Against a deployment with `AUTH_MODE=oidc`, the client sends a bearer token from
 │  Claude Cowork /     │  Bearer <token>   │                                             │
 │  Desktop / Cursor /  │                   │   OIDC verify ─► quota ─► allowed-host ─► …  │
 │  any MCP framework   │                   │        │                                     │
-└──────────────────────┘                   │        ├─ discovery ► arXiv · S2 · Unpaywall │
-           ▲                               │        ├─ fetch ────► job ─► Marker (GPU)    │
-           │  GET /a/<token>/…             │        └─ compile ──► nsjail + pdflatex      │
+└──────────────────────┘                   │        ├─ extract_pdf ► spool ─► job ────────┤
+           ▲                               │        └─ get_job ◄─── depth · page reached ─┤
+           │  GET /a/<token>/…             │                        Marker (GPU, jailed) ◄┘
            └────────────────────────────── │                                             │
-              figures · bundle.zip · pdf   │   artifacts: content-addressed, TTL-swept    │
+              figures · bundle.zip         │   artifacts: content-addressed, TTL-swept    │
                                            └─────────────────────────────────────────────┘
 ```
 
@@ -151,7 +151,7 @@ Full architecture lives in the [SRS](docs/superpowers/specs/2026-08-11-paper-mcp
 
 ## 🛡️ Security
 
-The service is internet-facing and executes caller-supplied LaTeX, so the controls are verified against a **running container** rather than a test client. That distinction is not pedantry: `TestClient` follows redirects, and that is exactly how a `307` on `POST /mcp` passed the suite while a connector would have broken on it. A property that only holds in-process is a property of a stack nobody is attacking.
+The service is internet-facing and feeds caller-supplied PDFs to an image decoder it cannot patch, so the controls are verified against a **running container** rather than a test client. That distinction is not pedantry: `TestClient` follows redirects, and that is exactly how a `307` on `POST /mcp` passed the suite while a connector would have broken on it. A property that only holds in-process is a property of a stack nobody is attacking.
 
 The attack surface exercised, against a real IdP:
 
@@ -163,29 +163,36 @@ The attack surface exercised, against a real IdP:
 | **Transport** | DNS rebinding via `Host` (`421`) · no redirect on `POST /mcp` |
 | **Artifacts** | six traversal encodings — plain, url-encoded, double-encoded, backslash, absolute, unknown token |
 | **Abuse** | quota exhaustion answering `429` with `Retry-After` |
-| **Sandbox** | shell escape · absolute-path read · escaping asset path, driven through the real `compile_latex` inside the jail |
+| **Decoder** | malformed, truncated and zero-page PDFs refused at the boundary in under 0.1 s, before reaching the decoder or the GPU |
 
 All 26 defended. Two rules that made the result trustworthy, both learned the hard way:
 
 1. **Attack the image you ship, and confirm the *installed* package carries the controls first.** One run reported a total auth bypass that did not exist in the code — the image predated the middleware.
 2. **Prove the guards don't break the product.** A service that rejects everyone is trivially secure and useless, so the whole flow is also driven through a real MCP client bearing a real token — resolve → extraction → compiled deck — confirming that **no session identifier is ever issued**: the server is `stateless_http`, so there is no handle to leak, and every request carries its own credential.
 
-### Compiling LaTeX
+### The one untrusted input
 
-`compile_latex` executes caller-supplied source, so it runs behind three layers: TeX flags (`-no-shell-escape`, `openin_any=p`, `openout_any=p`), **nsjail**, and wall-clock/output caps. One attempt, structured errors with file and line, no revise loop — the calling agent fixes and resubmits.
+With LaTeX out of scope there is nothing here that executes caller-supplied
+code — the jail, TeX Live and the `seccomp=unconfined` exemption it required
+are all gone, and the service image is a fifth of its former size.
 
-**Without a sandbox it refuses.** nsjail is Linux-only, so on a host lacking it the tool returns `sandbox_unavailable` unless `PAPER_MCP_AUTH_MODE=open`. Declining costs a caller one retry; running a stranger's program unisolated costs the host.
+What remains is a PDF fed to an image decoder that **cannot be patched**:
+`marker-pdf` pins `pillow<11` at every released version while the current
+decode advisories are fixed in 12.3.0. Pre-validation is no answer, because
+those advisories are reachable through images that are otherwise perfectly
+legitimate, and decoding documents is the product.
 
-The container needs `seccomp=unconfined` (already in `docker-compose.yml`): Docker's default profile blocks the namespace `clone()` nsjail requires, and without it every compile fails to launch. Measured — `SYS_ADMIN` and `--privileged` are *not* needed, which keeps the exemption narrow.
+So the control is not whether an exploit triggers but what it reaches. Marker
+runs as the sandbox boundary — published on loopback only, no capabilities, a
+read-only root with a sized tmpfs, memory and pid limits — with an upload
+ceiling and a page cap bounding what ever gets that far.
 
-```bash
-# the release gate: adversarial corpus inside the jail
-docker run --rm --security-opt seccomp=unconfined \
-  -v "$PWD/scripts:/app/scripts:ro" paper-mcp \
-  python /app/scripts/sandbox_corpus.py
-```
-
-Ten cases locally and nine in-jail, each failing closed: shell escape does not execute, absolute-path and traversal reads are refused, writes outside the job directory are refused, unbounded expansion is killed, no network is reachable from inside the jail — and a benign document still compiles.
+> [!NOTE]
+> Egress is deliberately left on. Cutting it is the strongest control compose
+> offers, but it also disables the `use_llm` accuracy pass that keeps table
+> structure honest, and compose cannot allowlist a single host. A keyless
+> deployment should cut it once the Surya weights are cached; one using
+> `GEMINI_API_KEY` cannot. Choose deliberately.
 
 ---
 
@@ -203,10 +210,10 @@ Environment only (twelve-factor). Nothing is read from a config file.
 | `PAPER_MCP_SUBJECT_SALT` | per-process | Salt for the HMAC of `sub` used in metering and logs. The raw subject is never logged |
 | `PAPER_MCP_QUOTA_CALLS_PER_MINUTE` | `60` | Per-caller call budget |
 | `PAPER_MCP_QUOTA_EXTRACTIONS_PER_HOUR` | `20` | Per-caller GPU-extraction budget |
-| `PAPER_MCP_QUOTA_COMPILE_SECONDS_PER_HOUR` | `600` | Per-caller compile budget, metered by time spent |
-| `PAPER_MCP_UNPAYWALL_EMAIL` | unset | Contact email enabling Unpaywall open-access lookup in `resolve_paper` |
-| `PAPER_MCP_S2_API_KEY` | unset | **Effectively required in production** — see below |
-| `PAPER_MCP_MARKER_URL` | `http://127.0.0.1:8002` | Marker service. **Required for extraction** — without it `fetch_paper` reports the dependency rather than degrading |
+| `PAPER_MCP_MARKER_URL` | `http://127.0.0.1:8002` | Marker service. **Required for extraction** — without it `extract_pdf` reports the dependency rather than degrading |
+| `PAPER_MCP_MAX_UPLOAD_BYTES` | `104857600` (100 MB) | Largest PDF accepted. Sized from a real library: median paper 10.6 MB, largest 67 MB. The transport limit is derived from this, so the two cannot disagree |
+| `PAPER_MCP_JOB_CONCURRENCY` | `1` | Extractions at once. 1 because a second concurrent dense page OOMs a 6 GB card — raise it on a bigger one. On a shared endpoint this is also the fairness ceiling |
+| `MARKER_DISABLE_OCR` | `1` | *(on the Marker service)* Trust the PDF's text layer instead of re-reading the page. The default avoids a VRAM spike that crashes a 6 GB card, at the cost of inline maths — an integral arrives as `R`, epsilon vanishes, while display equations stay perfect. Set `0` on a bigger card. Each bundle records which mode ran in `extraction.text_source` |
 | `PAPER_MCP_MARKER_MAX_PAGES` | `1` | Pages per Marker call. VRAM scales with page *content density*, not page count: one dense two-column page can saturate 6 GB, and a 5-page batch was measured at 21 minutes. Raise only on a bigger GPU |
 | `MARKER_GEMINI_MODEL` | `gemini-2.5-flash` | *(on the Marker service)* Model backing Marker's `use_llm` accuracy pass. marker-pdf carries its own default and Google has already retired it once — every call answered 404 while Marker returned `200`, so the pass stopped running with nothing to show for it. Pin it here when Google moves again |
 | `PAPER_MCP_PUBLIC_BASE_URL` | `http://localhost:8000` | Origin the artifact URLs are built from. Nothing is persisted with it — URLs are derived on every serve, so moving hosts does not strand a warm cache |
@@ -214,32 +221,31 @@ Environment only (twelve-factor). Nothing is read from a config file.
 | `PAPER_MCP_ARTIFACT_TTL_HOURS` | `24` | How long artifacts survive before the sweeper reclaims them |
 | `PAPER_MCP_LOG_LEVEL` | `INFO` | Log level, applied to uvicorn too. `WARNING` drops per-request access logging: measured 18,222 → 114 bytes over 300 requests. Worth setting for a public deployment — a server whose stdout backs up blocks inside `write()`, and per-request logging is what fills the buffer |
 
-### Semantic Scholar needs an API key
+### Why there is no search
 
-Measured on-device against the live API: the keyless tier throttles the **search** endpoint so hard it is unusable. A single `search_papers` call still returned HTTP 429 after **237 seconds** of paced retries, and a title lookup after **873 seconds**. Single-paper lookups (`/paper/{id}` by arXiv id, DOI, or S2 id) and the citation-graph endpoints answered fine throughout.
+Discovery was removed in v1.0 on measurement, not preference. Against the live
+API the keyless tier throttled the **search** endpoint so hard it was unusable:
+a single `search_papers` call still returned HTTP 429 after **237 seconds** of
+paced retries, and a title lookup after **873 seconds**. Across a later
+verification session it never once returned a result.
 
-So without `PAPER_MCP_S2_API_KEY`:
-
-| Works | Unreliable |
-| --- | --- |
-| `search_arxiv` (different upstream) | `search_papers` |
-| `resolve_paper` by arXiv id / DOI / `ss:` id | `resolve_paper` by free-text title |
-| `find_related` (all three modes) | |
-
-Callers get a typed `rate_limited` error carrying `retry_after`, never a hang or a silently empty result — but the capability is degraded. Get a key at <https://www.semanticscholar.org/product/api>.
+The endpoints that *did* work went with it. A tool surface teaches a calling
+agent what a service is for, and a narrow one that is entirely trustworthy is
+worth more than a broad one where two tools are excellent and one never
+answers. An agent already has better ways to find a paper than this service
+had — it does not have a better way to read one.
 
 ---
 
 ## 🎓 Skills
 
-Two starting-point skills ship in `skills/`, also served over `prompts/` so a Claude client surfaces them as slash commands:
+One starting-point skill ships in `skills/`, also served over `prompts/` so a Claude client surfaces it as a slash command:
 
 | Skill | Shows an agent how to |
 | --- | --- |
-| `paper-to-deck` | build a Beamer deck grounded in figures the paper actually contains |
 | `deep-read` | answer questions from the bundle rather than from memory of the paper |
 
-They are **examples, not the product.** The calling agent owns its pipelines and can ignore them entirely — which is exactly why this service ships tools rather than flows.
+It is an **example, not the product.** The calling agent owns its pipelines and can ignore them entirely — which is exactly why this service ships tools rather than flows.
 
 ---
 
@@ -247,7 +253,7 @@ They are **examples, not the product.** The calling agent owns its pipelines and
 
 ```bash
 uv sync
-uv run pytest                    # 199 tests, fast and offline (integration excluded)
+uv run pytest                    # 163 tests, fast and offline (integration excluded)
 uv run pytest -m integration     # spawns a real server, drives it with a real MCP client
 uv run ruff check src tests
 uv run mypy src                  # --strict
@@ -294,10 +300,9 @@ Things that do **not** fix it, tested: pinning `.python-version` (it selects an 
 .
 ├── src/paper_mcp/
 │   ├── server.py         # MCP server + FastAPI app · tools registered here
-│   ├── tools/            # discovery · fetch · compile — the MCP surface
-│   ├── pipelines/        # arXiv · Semantic Scholar · Marker → bundle · LaTeX
+│   ├── tools/            # extract · get_job — the MCP surface
+│   ├── pipelines/        # Marker client → bundle · html → markdown
 │   ├── api/              # auth+quota middleware · artifact routes (GET /a/…)
-│   ├── sandbox/          # nsjail policy
 │   ├── artifacts.py      # content-addressed store + TTL sweeper
 │   ├── auth.py           # OIDC resource server (JWKS, rotation-aware)
 │   └── quota.py          # per-caller token buckets
@@ -308,11 +313,11 @@ Things that do **not** fix it, tested: pinning `.python-version` (it selects an 
 ├── docs/superpowers/
 │   ├── specs/            # SRS — the single authoritative specification
 │   └── plans/            # implementation plans
-├── Dockerfile            # service + TeX Live + nsjail, one image
+├── Dockerfile            # the service, and nothing it does not need
 └── docker-compose.yml    # paper-mcp + marker
 ```
 
-`artifacts/` (gitignored) holds the content-addressed cache — derived data only, rebuildable from its key.
+`artifacts/` (gitignored) holds the content-addressed cache — derived data only, rebuildable from its key. `spool/` (also gitignored) holds uploads waiting for a worker; it is cleared at startup, since a restart has already forgotten the jobs they belonged to.
 
 ---
 

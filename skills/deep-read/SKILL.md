@@ -11,7 +11,10 @@ and most wrong — recalled numbers drift, and the bundle has the real ones.
 
 ## MANDATORY WORKFLOW
 
-1. **Fetch.** `fetch_paper(paper_id)`; poll `get_job` if it is extracting.
+1. **Extract.** `extract_pdf(content_base64=…)` with the PDF's bytes;
+   poll `get_job` if it is extracting — `progress` reports queue depth
+   while waiting and the page reached while running. Identical bytes are
+   a cache hit, so re-sending a paper costs nothing.
 2. **Orient by headings.** `markdown` carries the paper's own heading
    structure. Locate the relevant section before reading everything.
 3. **Quote from the markdown.** Tables arrived as real markdown tables and
@@ -19,7 +22,15 @@ and most wrong — recalled numbers drift, and the bundle has the real ones.
    exactly. Do it.
 4. **Check the figure index** when a question is visual. Captions in `figures`
    often answer "what does Figure 3 show?" without opening the image.
-5. **Say what is missing.** If the bundle does not contain the answer, say so.
+5. **Read `extraction.warnings` before quoting a table.** A table reported as
+   incomplete or misaligned has lost or shifted cells, and the numbers left
+   behind still look plausible. Say the table is unreliable rather than
+   quoting from it.
+6. **Check `extraction.text_source` before quoting inline maths.** On
+   `pdf-layer` the document's own text was trusted, which garbles symbols
+   inside prose — an integral reads as `R`, epsilon disappears — while
+   display equations in `$$` stay exact. Prefer the display forms.
+7. **Say what is missing.** If the bundle does not contain the answer, say so.
 
 ## Output
 

@@ -3,7 +3,7 @@
 Not a unit test and not a mock. It boots the real service, connects with a
 real MCP client, and drives the workflow an agent would actually run:
 
-    fetch_paper -> job -> poll -> bundle -> read markdown -> download a figure
+    extract_pdf -> job -> poll -> bundle -> read markdown -> download a figure
 
 Then it judges the *content*, because that is the product. Green here means
 an agent can use the output; a green pytest means only that the code runs.
@@ -11,11 +11,12 @@ an agent can use the output; a green pytest means only that the code runs.
 Requires the Marker service (`docker compose up -d marker`). Marker takes
 roughly a minute per dense page, so a full paper is a slow check by nature.
 
-Run:  uv run python scripts/paper_workflow_check.py [arxiv_id]
+Run:  uv run python scripts/paper_workflow_check.py <path/to/paper.pdf>
 """
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import re
@@ -30,7 +31,6 @@ from typing import Any
 import httpx
 from mcp.client.client import Client
 
-DEFAULT_ARXIV_ID = os.environ.get("PAPER_MCP_CHECK_ARXIV_ID", "1706.03762")
 MARKER_URL = os.environ.get("PAPER_MCP_MARKER_URL", "http://127.0.0.1:8002")
 EXTRACT_TIMEOUT_S = float(os.environ.get("PAPER_MCP_CHECK_TIMEOUT_S", "1800"))
 
@@ -97,20 +97,25 @@ def error_text(result: Any) -> str:
     return ""
 
 
-async def run(arxiv_id: str, base: str) -> None:
+async def run(pdf_path: str, base: str) -> None:
     url = f"{base}/mcp"
 
     async with Client(url, read_timeout_seconds=120.0) as client:
         # --- the workflow an agent actually runs --------------------------
         started = time.monotonic()
-        result = await client.call_tool("fetch_paper", {"paper_id": arxiv_id})
+        data = Path(pdf_path).read_bytes()
+        args = {
+            "content_base64": base64.b64encode(data).decode(),
+            "filename": Path(pdf_path).name,
+        }
+        result = await client.call_tool("extract_pdf", args)
         if result.is_error:
-            record("FAIL", "fetch_paper accepted", error_text(result)[:300])
+            record("FAIL", "extract_pdf accepted", error_text(result)[:300])
             return
         first = payload(result)
         record(
             "PASS",
-            "fetch_paper accepted",
+            "extract_pdf accepted",
             f"status={first['status']} ({time.monotonic() - started:.1f}s)",
         )
 
@@ -136,7 +141,7 @@ async def run(arxiv_id: str, base: str) -> None:
                 record("FAIL", "extraction completed", f"state={state}")
                 return
             record("PASS", "extraction completed", f"{time.monotonic() - started:.0f}s total")
-            again = await client.call_tool("fetch_paper", {"paper_id": arxiv_id})
+            again = await client.call_tool("extract_pdf", args)
             second = payload(again)
             bundle = second.get("bundle")
             if bundle is None:
@@ -212,7 +217,7 @@ async def run(arxiv_id: str, base: str) -> None:
 
         # --- cache hit ------------------------------------------------------
         t0 = time.monotonic()
-        cached = payload(await client.call_tool("fetch_paper", {"paper_id": arxiv_id}))
+        cached = payload(await client.call_tool("extract_pdf", args))
         elapsed = time.monotonic() - t0
         record(
             "PASS" if cached["status"] == "ready" and elapsed < 10 else "FAIL",
@@ -232,8 +237,12 @@ async def run(arxiv_id: str, base: str) -> None:
 
 
 async def main() -> int:
-    arxiv_id = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_ARXIV_ID
-    print(f"paper-mcp workflow check — arXiv:{arxiv_id}\n{'=' * 72}", flush=True)
+    if len(sys.argv) < 2:
+        print("usage: paper_workflow_check.py <path/to/paper.pdf>")
+        return 2
+    pdf_path = sys.argv[1]
+    print(f"paper-mcp workflow check — {Path(pdf_path).name}")
+    print("=" * 72, flush=True)
 
     if not httpx.get(f"{MARKER_URL}/health", timeout=5.0).is_success:
         print(f"Marker is not reachable at {MARKER_URL}. Run: docker compose up -d marker")
@@ -252,7 +261,7 @@ async def main() -> int:
                         break
                 except httpx.HTTPError:
                     time.sleep(0.3)
-            await run(arxiv_id, base)
+            await run(pdf_path, base)
         finally:
             proc.terminate()
             try:
