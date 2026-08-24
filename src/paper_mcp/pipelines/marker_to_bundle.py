@@ -95,6 +95,7 @@ class _PendingTable:
     rendered: int
     found: int
     name: str
+    html: str
 
 
 # Blocks that legitimately interleave a table's own cell run. A real page ran
@@ -102,6 +103,15 @@ class _PendingTable:
 # the tally — but prose must, or cells from a later table accrue to this one
 # and a complete 2x5 table gets reported as "10 of 177 cells found".
 _CELL_RUN_KINDS = frozenset({"TableCell", "Reference", "Caption", "Footnote"})
+
+
+def _keep_table_source(html: str, *, asset_dir: Path, index: int) -> str:
+    """Write a damaged table's source html into the bundle; return its path."""
+    tables_dir = asset_dir / "tables"
+    tables_dir.mkdir(parents=True, exist_ok=True)
+    name = f"table-{index:03d}.html"
+    (tables_dir / name).write_text(html, encoding="utf-8")
+    return f"tables/{name}"
 
 
 def _table_name(table_markdown: str) -> str:
@@ -219,6 +229,7 @@ def marker_doc_to_bundle_parts(
     # those blocks are the sole surviving copy and dropping them loses the
     # data outright. Compare, and say so.
     pending_table: _PendingTable | None = None
+    kept_tables: list[str] = []
 
     def _close_pending_table() -> None:
         """Report a table whose rendered cell count disagrees with Marker's.
@@ -238,22 +249,32 @@ def marker_doc_to_bundle_parts(
         nonlocal pending_table
         if pending_table is None:
             return
-        rendered, found, name = pending_table.rendered, pending_table.found, pending_table.name
+        table = pending_table
         pending_table = None
-        if found == 0:
+        rendered, found, name = table.rendered, table.found, table.name
+        if found == 0 or rendered == found:
             return
+
+        # Keep the source only for a table the caller is being told to
+        # distrust. Telling someone their numbers are unreliable and offering
+        # no way to the real ones is half a feature; keeping every table's
+        # html would double the zip for the tables that are fine.
+        source = _keep_table_source(table.html, asset_dir=asset_dir, index=len(kept_tables) + 1)
+        kept_tables.append(source)
+        where = f" Marker's own html for it is in {source} inside the artifact zip."
+
         if found > rendered:
             warnings.append(
                 f"table {name!r} rendered {rendered} of the {found} cells Marker "
                 f"found; {found - rendered} were dropped — treat this table as "
-                "incomplete"
+                f"incomplete.{where}"
             )
-        elif rendered > found:
+        else:
             warnings.append(
                 f"table {name!r} rendered {rendered} cells from the {found} Marker "
                 f"found, so {rendered - found} were padded — a row lost a cell and "
-                "its values are probably shifted; treat the column alignment as "
-                "unreliable"
+                f"its values are probably shifted; treat the column alignment as "
+                f"unreliable.{where}"
             )
 
     # Computed up front: a crop can arrive before the figure containing it,
@@ -325,6 +346,7 @@ def marker_doc_to_bundle_parts(
                     rendered=_rendered_cell_count(table),
                     found=0,
                     name=_table_name(table),
+                    html=block.html,
                 )
             else:
                 # Falling back to stripped text would produce the cell-blob

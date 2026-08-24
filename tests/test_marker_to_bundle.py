@@ -594,3 +594,55 @@ def test_a_fully_populated_table_is_not_flagged_as_misaligned(tmp_path: Path) ->
     _md, _f, warnings = marker_doc_to_bundle_parts(doc, asset_dir=tmp_path)
 
     assert warnings == []
+
+
+def test_a_damaged_table_keeps_its_source_for_recovery(tmp_path: Path) -> None:
+    """A warning without a recovery path is only half a feature.
+
+    When the render drops or pads cells the caller is told the table is
+    unreliable and then offered nothing better: the artifact zip holds the
+    same degraded markdown, so the numbers are unrecoverable from anything
+    the service provides. Marker's own html for that table still has them,
+    and it costs a few kilobytes to keep.
+    """
+    doc = _doc(
+        MarkerBlock(
+            block_type="Table",
+            html=(
+                "<table><tbody>"
+                "<tr><th>Size</th><th>Model</th><th>LAMBADA</th></tr>"
+                "<tr><td>Small</td><td>GPT-2</td><td>45.04</td></tr>"
+                "<tr><td>SEDD</td><td>50.92</td></tr>"
+                "</tbody></table>"
+            ),
+        ),
+        *[MarkerBlock(block_type="TableCell", html=f"<td>{i}</td>") for i in range(8)],
+    )
+
+    _md, _f, warnings = marker_doc_to_bundle_parts(doc, asset_dir=tmp_path)
+
+    source = tmp_path / "tables" / "table-001.html"
+    assert source.is_file(), "the damaged table's source was not kept"
+    assert "50.92" in source.read_text(encoding="utf-8")
+    # And the warning points at it, or the caller cannot find it.
+    assert any("table-001.html" in w for w in warnings), warnings
+
+
+def test_an_undamaged_table_does_not_litter_the_bundle(tmp_path: Path) -> None:
+    # Keeping every table's html would double the zip for no reason. Only a
+    # table the caller was told to distrust needs a fallback.
+    doc = _doc(
+        MarkerBlock(
+            block_type="Table",
+            html=(
+                "<table><tbody><tr><th>Model</th><th>BLEU</th></tr>"
+                "<tr><td>Base</td><td>27.3</td></tr></tbody></table>"
+            ),
+        ),
+        *[MarkerBlock(block_type="TableCell", html=f"<td>{i}</td>") for i in range(4)],
+    )
+
+    _md, _f, warnings = marker_doc_to_bundle_parts(doc, asset_dir=tmp_path)
+
+    assert warnings == []
+    assert not (tmp_path / "tables").exists()
