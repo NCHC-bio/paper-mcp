@@ -244,7 +244,24 @@ async def run(pdf_path: str, base: str) -> None:
         )
 
 
+def _utf8_console() -> None:
+    """Print extraction output without dying on it.
+
+    Extraction output is arbitrary academic text. One warning naming a table
+    column that contains a Greek epsilon (U+03F5) killed a run in which every
+    content assertion had already passed, and the em dash in the title line
+    mojibaked — a cp950 console can encode neither. Replace rather than raise:
+    a check that dies while reporting success is worse than one that prints a
+    question mark.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="replace")
+
+
 async def main() -> int:
+    _utf8_console()
     if len(sys.argv) < 2:
         print("usage: paper_workflow_check.py <path/to/paper.pdf>")
         return 2

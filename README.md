@@ -12,7 +12,7 @@ Hand it a PDF; get the full text as markdown, with real tables, LaTeX equations,
 ![Auth](https://img.shields.io/badge/auth-OIDC%20resource%20server-2A6DB2)
 ![Lint](https://img.shields.io/badge/lint-ruff-261230?logo=ruff&logoColor=white)
 ![Types](https://img.shields.io/badge/types-mypy%20--strict-2A6DB2)
-![Tests](https://img.shields.io/badge/tests-176%20unit%20%2B%207%20integration-brightgreen)
+![Tests](https://img.shields.io/badge/tests-205%20unit%20%2B%207%20integration-brightgreen)
 
 </div>
 
@@ -254,7 +254,7 @@ It is an **example, not the product.** The calling agent owns its pipelines and 
 
 ```bash
 uv sync
-uv run pytest                    # 163 tests, fast and offline (integration excluded)
+uv run pytest                    # 205 tests, fast and offline (integration excluded)
 uv run pytest -m integration     # spawns a real server, drives it with a real MCP client
 uv run ruff check src tests
 uv run mypy src                  # --strict
@@ -265,16 +265,16 @@ uv run paper-mcp
 
 The interpreter is pinned in `.python-version` (3.13) so every contributor and the container build agree on one runtime (NFR-07).
 
-**pytest proves the code runs; it cannot prove the product works.** Mocked tests are blind to upstream contracts by construction, so two on-device checks are load-bearing:
+**pytest proves the code runs; it cannot prove the product works.** Mocked tests are blind to upstream contracts by construction, so the on-device check is load-bearing:
 
 ```bash
-uv run python scripts/on_device_check.py                 # every tool, every externally-dependent branch
-uv run python scripts/paper_workflow_check.py 1706.03762 # the real workflow, judged on content
+uv run python scripts/paper_workflow_check.py path/to/paper.pdf  # the real workflow, judged on content
 ```
 
-The first boots the service through its real entry point and drives it with a real MCP client over the wire. A throttled upstream is reported `skip`, never `pass` — a check that cannot reach its branch has not verified it.
+It boots the service through its real entry point, drives it with a real MCP client over the wire, and judges the *output*: does the markdown have tables whose cell counts survived the render, equations as LaTeX, a populated and captioned figure index, and figure URLs that download real image bytes? Slow by nature — Marker takes roughly a minute per dense page. It takes a path to a PDF; acquiring the paper is your job, as it is the calling agent's.
 
-The second judges the *output*: does the markdown have tables with separator rows, equations as LaTeX, a populated and captioned figure index, and figure URLs that download real image bytes? Slow by nature — Marker takes roughly a minute per dense page.
+> [!WARNING]
+> `scripts/authenticated_client_check.py` and `scripts/security_check.py` **predate v1.0 and do not currently pass.** Both still drive tools that were deleted with discovery and LaTeX compilation — the first fails outright on `resolve_paper`/`search_papers`/`fetch_paper` and asserts a seven-tool surface against today's two; the second's three `compile_latex` probes now pass *vacuously*, reporting a LaTeX sandbox as verified when the tool it sandboxed no longer exists. Do not read either as a green light until they are rewritten against `extract_pdf`.
 
 Between them these have caught defects the unit suite passed clean: a `307` redirect on `POST /mcp` (the in-process test client follows redirects), a Semantic Scholar field name one endpoint accepts and another rejects, a `similar` mode pointed at an endpoint that does not exist, a synchronous arXiv client blocking the event loop (three concurrent calls: 20.5 s → 0.7 s once threaded), and a bundle that persisted absolute artifact URLs — so a warm cache surviving a redeploy handed out figure links to an origin that no longer answered.
 
