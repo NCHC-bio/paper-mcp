@@ -43,8 +43,39 @@ services:
       # Turn it on when you have actually put a proxy in front.
       - PAPER_MCP_TRUST_FORWARDED_FOR=${PAPER_MCP_TRUST_FORWARDED_FOR:-0}
       - PAPER_MCP_LOG_LEVEL=${PAPER_MCP_LOG_LEVEL:-warning}
+      # Authentication. `open` means every caller is unauthenticated, which is
+      # fine on a laptop and never on a public endpoint. These were absent
+      # from this file entirely, so following the README's own deployment
+      # warning left you on AUTH_MODE=open with no way to say otherwise.
+      # Set the mode and both OIDC variables together; the service logs an
+      # error at boot if the mode is set without an issuer and audience.
+      - PAPER_MCP_AUTH_MODE=${PAPER_MCP_AUTH_MODE:-open}
+      - PAPER_MCP_OIDC_ISSUER=${PAPER_MCP_OIDC_ISSUER:-}
+      - PAPER_MCP_OIDC_AUDIENCE=${PAPER_MCP_OIDC_AUDIENCE:-}
+      # Stable key for per-caller metering. Unset means a per-process
+      # ephemeral salt, so every caller's quota resets whenever the process
+      # does — which on a crash-looping container is no quota at all.
+      - PAPER_MCP_SUBJECT_SALT=${PAPER_MCP_SUBJECT_SALT:-}
+      # Figure URLs are built from this. Left at the default, every image_url
+      # a caller receives points at localhost:8000 regardless of where the
+      # service actually answers.
+      - PAPER_MCP_PUBLIC_BASE_URL=${PAPER_MCP_PUBLIC_BASE_URL:-http://localhost:8000}
+      - PAPER_MCP_ALLOWED_ORIGINS=${PAPER_MCP_ALLOWED_ORIGINS:-}
+      - PAPER_MCP_QUOTA_CALLS_PER_MINUTE=${PAPER_MCP_QUOTA_CALLS_PER_MINUTE:-60}
+      - PAPER_MCP_QUOTA_EXTRACTIONS_PER_HOUR=${PAPER_MCP_QUOTA_EXTRACTIONS_PER_HOUR:-20}
+      - PAPER_MCP_ARTIFACT_TTL_HOURS=${PAPER_MCP_ARTIFACT_TTL_HOURS:-24}
+      # Queue depth past which new work is refused rather than accepted into
+      # an unbounded backlog. Extraction is serialized, so at ~45 s a paper
+      # the default is roughly 24 minutes of queue.
+      - PAPER_MCP_MAX_QUEUED_JOBS=${PAPER_MCP_MAX_QUEUED_JOBS:-32}
+      # On its own volume. Derived from the artifact root this landed on
+      # /app/spool — the container's writable layer — so a backlog of 100 MB
+      # uploads filled the Docker root disk rather than the volume sized for
+      # this data.
+      - PAPER_MCP_SPOOL_DIR=/app/spool
     volumes:
       - paper-mcp-artifacts:/app/artifacts
+      - paper-mcp-spool:/app/spool
     # No `seccomp=unconfined` here any more. It existed because nsjail creates
     # namespaces, which Docker's default profile blocks — and nsjail existed
     # because this service compiled caller-supplied LaTeX. With compilation
@@ -72,7 +103,13 @@ services:
     # behind a bearer token and an extraction budget. paper-mcp reaches Marker
     # over the compose network (`http://marker:8002`) regardless; the
     # published port exists for the from-source dev flow.
-    ports: ["127.0.0.1:8002:8002"]
+    #
+    # The host side is overridable because 8002 collides in practice — it
+    # blocked `docker compose up` against another project on the same
+    # machine. The bind address stays loopback by default and MUST stay
+    # loopback on any shared host, for the pillow reasons above. Override the
+    # whole left side, e.g. PAPER_MCP_MARKER_PUBLISH=127.0.0.1:18002
+    ports: ["${PAPER_MCP_MARKER_PUBLISH:-127.0.0.1:8002}:8002"]
     environment:
       # Marker's use_llm accuracy pass materially improves tables, math and
       # layout. It is an internal quality knob on a deterministic pipeline —
@@ -156,4 +193,8 @@ services:
 
 volumes:
   paper-mcp-artifacts:
+  # Separate from the artifact cache because the contents are different in
+  # kind: these are the caller's original uploads, held only until their job
+  # runs, and never served over HTTP.
+  paper-mcp-spool:
   marker-models:
