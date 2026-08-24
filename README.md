@@ -19,7 +19,9 @@ The full text as markdown · every figure indexed with its caption · a sandboxe
 
 ---
 
-Built for external agent clients (Claude Cowork, Claude Desktop, Cursor, any MCP framework). It supplies what those clients lack — paper acquisition and faithful extraction — and nothing else: **no accounts, no stored user data, no server-side LLM calls, and no agent flows.**
+Built for external agent clients (Claude Cowork, Claude Desktop, Cursor, any MCP framework). It supplies what those clients lack — faithful extraction — and nothing else: **no accounts, no stored user data, and no agent flows.**
+
+One caveat that belongs here rather than in a footnote: extraction is deterministic **only when the service runs keyless**. Set `GEMINI_API_KEY` and Marker's accuracy pass sends page content to Google's API on every extraction — better tables and maths, at the cost of the document leaving the host. Leave it unset and nothing does. Each bundle records which model produced it in `extraction.llm_model`, so the choice is auditable after the fact rather than assumed.
 
 This is *data-processing functionality*, not an agent. Pipelines built on top — slides, summaries, literature reviews — belong to the calling agent and its own skills. This service's only job is to make each step precise.
 
