@@ -206,7 +206,13 @@ def charge_extraction() -> None:
 async def tool_extract_pdf(content_base64: str, filename: str | None = None) -> ExtractResult:
     """Extract a caller-supplied PDF into markdown plus a figure index."""
     cfg = settings()
-    pdf = decode_pdf(content_base64, max_bytes=cfg.max_upload_bytes)
+    # Off the loop. A 100 MB base64 decode plus a PyMuPDF open is tens to
+    # hundreds of milliseconds of pure CPU, and it ran inline: ten 86 MB
+    # uploads accumulated 11.0 s of event-loop stall in a 28.4 s window, with
+    # 8 of 38 concurrent /health probes taking over a second.
+    pdf = await asyncio.to_thread(
+        decode_pdf, content_base64, max_bytes=cfg.max_upload_bytes
+    )
 
     store = artifact_store()
     key = bundle_key(pdf)
@@ -232,7 +238,8 @@ async def tool_extract_pdf(content_base64: str, filename: str | None = None) -> 
     # `submit` decides this from the same incumbent, and does not await, so
     # reading it here cannot disagree with what happens below.
     incumbent = jobs.for_key(key)
-    if incumbent is None or incumbent.state == "done":
+    starting_work = incumbent is None or incumbent.state == "done"
+    if starting_work:
         charge_extraction()
 
     # Spooled rather than closed over. A queued job that holds its upload in
@@ -240,8 +247,14 @@ async def tool_extract_pdf(content_base64: str, filename: str | None = None) -> 
     # a 100 MB ceiling and a single worker, ten waiting uploads pinned
     # hundreds of megabytes for no reason but waiting. On disk, the cost is
     # one in-flight document regardless of queue depth.
+    #
+    # Written only when this call will actually start a job, and written off
+    # the loop. Joining an in-flight job wrote the entire upload and unlinked
+    # it a few lines later — up to 100 MB of synchronous disk write per poll,
+    # for a file that never had a reader.
     spooled = spool_path(key)
-    spooled.write_bytes(pdf)
+    if starting_work:
+        await asyncio.to_thread(spooled.write_bytes, pdf)
 
     async def run() -> str:
         def _progress(done: int, total: int) -> None:

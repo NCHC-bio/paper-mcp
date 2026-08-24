@@ -47,6 +47,24 @@ def _client_ip(request: Request, *, trust_forwarded: bool) -> str:
     return request.client.host if request.client else "unknown"
 
 
+# One call-token per request, plus one per 8 MiB of declared body. A 100 MB
+# upload and a 2 KB poll both cost exactly one token under a flat charge, but
+# the upload costs a 100 MB base64 decode, a PyMuPDF open and a spool write.
+# Measured: ten 86 MB uploads stalled the loop for 11.0 s of a 28.4 s window
+# and pushed /health to 1.67 s, and every one of them was comfortably inside
+# the 60-calls/minute budget.
+_CALL_BYTES_PER_TOKEN = 8 * 1024 * 1024
+
+
+def call_cost(declared_bytes: int) -> float:
+    """Call-budget tokens a request of this declared size costs.
+
+    Declared, not actual: `Content-Length` is what is known before the body is
+    read, and reading the body to price it is the cost being metered.
+    """
+    return 1.0 + max(0, declared_bytes) / _CALL_BYTES_PER_TOKEN
+
+
 class AuthQuotaMiddleware(BaseHTTPMiddleware):
     async def dispatch(
         self, request: Request, call_next: RequestResponseEndpoint
@@ -81,8 +99,9 @@ class AuthQuotaMiddleware(BaseHTTPMiddleware):
         # SDK's check remains the backstop for one. Every MCP client sends a
         # length, so in practice this is the path a caller hits.
         declared = request.headers.get("content-length", "")
-        if declared.isdigit() and int(declared) > request_body_limit(cfg.max_upload_bytes):
-            return _payload_too_large(int(declared), cfg.max_upload_bytes)
+        declared_bytes = int(declared) if declared.isdigit() else 0
+        if declared_bytes > request_body_limit(cfg.max_upload_bytes):
+            return _payload_too_large(declared_bytes, cfg.max_upload_bytes)
 
         principal: Principal
 
@@ -106,7 +125,7 @@ class AuthQuotaMiddleware(BaseHTTPMiddleware):
                 return _unauthorized("token rejected")
 
         try:
-            quota_store().consume(principal.subject_hash, "calls")
+            quota_store().consume(principal.subject_hash, "calls", call_cost(declared_bytes))
         except QuotaExceededError as exc:
             return _too_many(exc)
 

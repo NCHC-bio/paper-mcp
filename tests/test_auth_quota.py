@@ -547,3 +547,20 @@ async def test_an_unreachable_idp_is_paid_for_once_per_window(
                 await auth_mod.verify_token(token)
 
     assert calls == 1, f"{calls} fetches for 3 requests against an unreachable IdP"
+
+
+def test_a_large_body_costs_more_call_budget_than_a_poll() -> None:
+    """One call can cost far more than a flat charge assumes.
+
+    Ten identical 86 MB uploads stalled the loop for 11.0 s of a 28.4 s
+    window, all ten inside the 60-calls/minute budget and none charged for
+    GPU. The call meter is what sees them, so it has to see their size.
+    """
+    from paper_mcp.api.middleware import call_cost
+
+    assert call_cost(0) == 1.0
+    assert call_cost(2 * 1024) == pytest.approx(1.0, abs=0.01)
+    # An 86 MB upload is not one poll's worth of work.
+    assert call_cost(86 * 1024 * 1024) > 10
+    # Monotonic, so a bigger body never costs less.
+    assert call_cost(50 * 1024 * 1024) < call_cost(100 * 1024 * 1024)

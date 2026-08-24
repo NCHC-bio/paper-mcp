@@ -370,3 +370,47 @@ async def test_polling_while_a_job_runs_does_not_spend_the_gpu_budget(
 
     # One job was started, so exactly one unit is gone.
     assert quota.remaining(principal.subject_hash, "extractions") == 1.0
+
+
+async def test_joining_an_in_flight_job_writes_no_spool_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A poll must not write the whole upload to disk and delete it again.
+
+    The spool write happened before the join was decided, so every repeat
+    upload of an in-flight document wrote up to 100 MB — synchronously, on
+    the event loop — for a file that was unlinked a few lines later and never
+    had a reader. Counting the writes is the only way to see it: the leftover
+    file count is identical either way.
+    """
+    release = asyncio.Event()
+
+    async def _blocking_build(pdf: bytes, **kwargs: object) -> object:
+        await release.wait()
+        raise RuntimeError("never completes during this test")
+
+    monkeypatch.setattr(extract_mod, "build_bundle", _blocking_build)
+    monkeypatch.setattr(extract_mod, "artifact_store", lambda: ArtifactStore(tmp_path))
+    monkeypatch.setattr(extract_mod, "_jobs", None)
+    monkeypatch.setenv("PAPER_MCP_ARTIFACT_ROOT", str(tmp_path / "artifacts"))
+
+    writes: list[Path] = []
+    real_write_bytes = Path.write_bytes
+
+    def _counting_write(self: Path, data: bytes) -> int:
+        writes.append(self)
+        return real_write_bytes(self, data)
+
+    monkeypatch.setattr(Path, "write_bytes", _counting_write)
+
+    pdf = _real_pdf()
+    spool = extract_mod.spool_dir()
+    await extract_mod.tool_extract_pdf(_b64(pdf))
+    await extract_mod.tool_extract_pdf(_b64(pdf))
+
+    spool_writes = [w for w in writes if w.parent == spool]
+    assert len(spool_writes) == 1, (
+        f"the joining caller wrote a spool file it never read: {spool_writes}"
+    )
+
+    release.set()
