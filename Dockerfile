@@ -29,8 +29,27 @@ COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
 # Skills are served as MCP prompts, so they ship with the image.
 COPY skills ./skills
+# Installed FROM THE LOCKFILE, not from the dependency ranges.
+#
+# `uv pip install --system .` resolved `pyproject.toml` and ignored the
+# `uv.lock` copied in on the line above, so every build took whatever was
+# newest on PyPI. That is not a theoretical drift: it shipped `mcp` 2.1.0
+# against a lockfile pinning 2.0.0, and 2.1.0 renders a failed tool call as a
+# bare "Error executing tool extract_pdf" with the reason stripped. Every
+# worded error this service raises — "not valid base64; send the PDF bytes
+# base64-encoded", "quota exceeded; retry in 3600s", "Marker is unreachable,
+# check /health" — reached a real connector as that bare string, which voids
+# the error contract (SRS I-8 #7) in exactly the deployment nobody tests
+# locally. 204 green tests on 2.0.0 said nothing about it.
+#
+# Exported rather than `uv sync`, because this image installs system-wide and
+# runs the `paper-mcp` console script directly rather than through a venv.
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system .
+    uv export --frozen --no-dev --no-emit-project --format requirements-txt \
+        -o /tmp/requirements.txt \
+    && uv pip install --system --no-deps -r /tmp/requirements.txt \
+    && uv pip install --system --no-deps . \
+    && rm /tmp/requirements.txt
 
 # The artifact cache. Mounted as a volume in compose so bundles survive a
 # container replacement — re-extracting a paper costs GPU minutes.
