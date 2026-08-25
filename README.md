@@ -253,8 +253,9 @@ so check that field rather than assuming.
 The other two want measuring rather than maximising. VRAM scales with page
 **content density**, not page count, and batching has a latency cliff as well
 as a memory one: a 5-page batch measured **21 minutes** on the small card.
-Raise `MARKER_MAX_PAGES` a step at a time against a genuinely dense
-two-column paper — not a preprint — and watch VRAM before going further.
+Raise `PAPER_MCP_MARKER_MAX_PAGES` a step at a time against a genuinely
+dense two-column paper — not a preprint — and watch VRAM before going
+further.
 
 Supporting limits, which are host RAM and disk rather than VRAM, and should
 move up alongside a bigger batch:
@@ -309,7 +310,7 @@ horizontally. With more than one replica behind a load balancer:
 One replica on a large GPU is a supported, well-tested configuration.
 Horizontal scaling is not a config change — it needs the quota store and job
 registry moved into shared state, which v1.0 deliberately traded away for a
-single-host deployment (SRS §II-6).
+single-host deployment (SRS §NFR-01, §II-1).
 
 ### Why there is no search
 
@@ -369,7 +370,7 @@ The second stands up a real IdP, mints a real token, and drives `extract_pdf` �
 The third builds the image and attacks it from outside — transport security, path traversal on the artifact route, token forgery, quota, and the method guard on `/mcp`.
 
 > [!NOTE]
-> Both container-based checks reach Marker on the host at `:8002` by default. Set `PAPER_MCP_MARKER_HOST_PORT` if it is published elsewhere — that port collides in practice.
+> The two checks that drive Marker reach it on the host at `:8002` by default, and that port collides in practice. Override it with `PAPER_MCP_MARKER_URL` for the first and `PAPER_MCP_MARKER_HOST_PORT` for the second — they differ because the second runs against the container and resolves the host separately. The third never contacts Marker.
 
 Between them these have caught defects the unit suite passed clean: a `307` redirect on `POST /mcp` (the in-process test client follows redirects), a Semantic Scholar field name one endpoint accepts and another rejects, a `similar` mode pointed at an endpoint that does not exist, a synchronous arXiv client blocking the event loop (three concurrent calls: 20.5 s → 0.7 s once threaded), and a bundle that persisted absolute artifact URLs — so a warm cache surviving a redeploy handed out figure links to an origin that no longer answered.
 

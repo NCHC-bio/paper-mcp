@@ -117,9 +117,10 @@ services:
       # (SRS §I-7).
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       # Which model that accuracy pass calls. marker-pdf carries its own
-      # default and Google has already retired it once — every call 404'd,
+      # default and Google has now retired it twice — every call 404'd,
       # Marker logged a warning, returned 200, and the pass silently stopped
-      # running. Empty falls back to the pinned default in llm_config.py.
+      # running. Empty falls back to the pin in llm_config.py, currently
+      # gemini-3.6-flash.
       - MARKER_GEMINI_MODEL=${MARKER_GEMINI_MODEL:-}
       # Trust the PDF's own text layer instead of re-reading the page.
       # The default (1) is a hardware constraint: Surya's recognition pass on
