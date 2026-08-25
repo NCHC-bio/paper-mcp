@@ -1,0 +1,234 @@
+<!doctype html>
+<!--
+  paper-mcp social preview - source of truth for docs/assets/social-preview.png
+
+  Regenerate after editing (headless Chrome or Edge, either works):
+
+    chrome.exe --headless --disable-gpu --hide-scrollbars
+      --force-device-scale-factor=1 --window-size=1280,640
+      --screenshot=docs/assets/social-preview.png
+      file:///<abs-path>/docs/assets/social-preview.html
+
+  The PNG is uploaded by hand at Settings -> General -> Social preview.
+  GitHub does not read it from the repository.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>paper-mcp social preview</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  html, body { width: 1280px; height: 640px; overflow: hidden; }
+
+  body {
+    background: #0d1117;
+    font-family: "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .canvas {
+    position: relative;
+    width: 1280px; height: 640px;
+    padding: 52px 56px 44px;
+    display: flex; flex-direction: column;
+    background:
+      radial-gradient(900px 460px at 82% 8%, rgba(255, 111, 0, .10), transparent 62%),
+      radial-gradient(760px 520px at 6% 96%, rgba(42, 109, 178, .16), transparent 64%),
+      #0d1117;
+  }
+
+  /* Ties the image back to the README badge row. */
+  .canvas::before {
+    content: ""; position: absolute; inset: 0 0 auto 0; height: 5px;
+    background: linear-gradient(90deg, #ff6f00, #ff9d3f 34%, #2a6db2 74%, #3776ab);
+  }
+
+  .brand {
+    display: flex; align-items: center; gap: 15px;
+    font-size: 46px; font-weight: 700; letter-spacing: -1.2px;
+    color: #e6edf3; line-height: 1;
+  }
+  /* Drawn rather than set as an emoji, so the render does not depend on
+     which symbol font the rendering machine happens to fall back to. */
+  .brand svg { display: block; }
+
+  .tagline {
+    margin-top: 14px; max-width: 880px;
+    font-size: 19px; line-height: 1.5; color: #8b949e;
+  }
+  .tagline b { color: #c9d1d9; font-weight: 600; }
+
+  .flow {
+    flex: 1; display: flex; align-items: center; gap: 26px;
+    margin-top: 26px;
+  }
+
+  /* ---- left: the PDF you hand it ---------------------------------- */
+  .side { display: flex; flex-direction: column; align-items: center; gap: 12px; }
+
+  .page {
+    width: 236px; height: 296px; padding: 20px 18px;
+    background: #f6f4ef; border-radius: 5px;
+    box-shadow: 0 14px 34px rgba(0, 0, 0, .55);
+    display: flex; flex-direction: column; gap: 11px;
+  }
+  .l { height: 5px; border-radius: 2px; background: rgba(13, 17, 23, .17); }
+  .l.head { height: 8px; background: rgba(13, 17, 23, .42); }
+  .cols { display: flex; gap: 12px; }
+  .col { flex: 1; display: flex; flex-direction: column; gap: 6px; }
+
+  .mini-table { border: 1px solid rgba(13, 17, 23, .30); border-radius: 3px; }
+  .mini-table div { display: flex; }
+  .mini-table span {
+    flex: 1; height: 13px;
+    border-right: 1px solid rgba(13, 17, 23, .22);
+    border-bottom: 1px solid rgba(13, 17, 23, .22);
+  }
+  .mini-table div:last-child span { border-bottom: 0; }
+  .mini-table span:last-child { border-right: 0; }
+
+  .mini-fig {
+    height: 46px; border-radius: 3px;
+    background: repeating-linear-gradient(-45deg,
+      rgba(13, 17, 23, .13) 0 6px, rgba(13, 17, 23, .06) 6px 12px);
+  }
+
+  .caption { font-size: 13px; color: #6e7681; letter-spacing: .3px; }
+
+  /* ---- middle: the transform -------------------------------------- */
+  .arrow { display: flex; flex-direction: column; align-items: center; gap: 9px; }
+  .arrow .who {
+    font-size: 12px; font-weight: 600; letter-spacing: 1.4px;
+    text-transform: uppercase; color: #ff9d3f;
+  }
+
+  /* ---- right: what comes back ------------------------------------- */
+  .out {
+    flex: 1; align-self: stretch;
+    background: #161b22; border: 1px solid #30363d; border-radius: 12px;
+    box-shadow: 0 14px 34px rgba(0, 0, 0, .45);
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  .out .strip {
+    padding: 9px 18px; border-bottom: 1px solid #30363d;
+    background: rgba(255, 255, 255, .022);
+    font-size: 12.5px; color: #8b949e; letter-spacing: .3px;
+  }
+  .out .strip b { color: #c9d1d9; font-weight: 600; }
+
+  /* Flex centring keeps the block optically centred however many lines it holds. */
+  .code { flex: 1; padding: 16px 22px; display: flex; align-items: center; }
+  .code > div {
+    font-family: "Cascadia Mono", "Cascadia Code", Consolas, "Courier New", monospace;
+    font-size: 14.5px; line-height: 1.62; color: #c9d1d9;
+    white-space: pre;
+  }
+  .h1  { color: #79c0ff; font-weight: 600; }
+  .txt { color: #8b949e; }
+  .tbl { color: #e6edf3; }
+  .tex { color: #ffa657; }
+  .img { color: #7ee787; }
+  .cap { color: #6e7681; font-style: italic; }
+  .sp  { display: block; height: 7px; }
+
+  /* ---- bottom rail ------------------------------------------------ */
+  .rail {
+    margin-top: 24px; display: flex; align-items: center;
+    justify-content: space-between; gap: 16px;
+  }
+  .chips { display: flex; gap: 10px; }
+  .chip {
+    padding: 6px 14px; border-radius: 999px;
+    border: 1px solid #30363d; background: rgba(255, 255, 255, .03);
+    font-size: 13px; color: #8b949e; white-space: nowrap;
+  }
+  .repo {
+    font-family: "Cascadia Mono", Consolas, monospace;
+    font-size: 14px; color: #58a6ff;
+  }
+</style>
+</head>
+<body>
+<div class="canvas">
+
+  <div class="brand">
+    <svg width="37" height="46" viewBox="0 0 37 46" fill="none">
+      <path d="M3 3.5a2.5 2.5 0 0 1 2.5-2.5H23l13 13v29a2.5 2.5 0 0 1-2.5 2.5h-28A2.5 2.5 0 0 1 3 42.5V3.5z"
+            fill="#f6f4ef"/>
+      <path d="M23 1l13 13H25.5A2.5 2.5 0 0 1 23 11.5V1z" fill="#cfcabd"/>
+      <g fill="#0d1117" opacity=".62">
+        <rect x="9" y="21" width="21" height="2.6" rx="1.3"/>
+        <rect x="9" y="27" width="21" height="2.6" rx="1.3"/>
+        <rect x="9" y="33" width="13" height="2.6" rx="1.3"/>
+      </g>
+      <rect x="24.5" y="33" width="5.5" height="2.6" rx="1.3" fill="#ff6f00"/>
+    </svg>
+    paper-mcp
+  </div>
+  <div class="tagline">
+    Hand it a PDF; get the full text as markdown &mdash; with <b>real tables</b>,
+    <b>LaTeX equations</b>, and <b>every figure indexed by its caption</b>.
+  </div>
+
+  <div class="flow">
+
+    <div class="side">
+      <div class="page">
+        <div class="l head" style="width: 78%"></div>
+        <div class="l" style="width: 52%; opacity: .7"></div>
+        <div class="cols">
+          <div class="col">
+            <div class="l"></div><div class="l"></div><div class="l"></div>
+            <div class="l" style="width: 74%"></div>
+          </div>
+          <div class="col">
+            <div class="l"></div><div class="l"></div><div class="l"></div>
+            <div class="l" style="width: 62%"></div>
+          </div>
+        </div>
+        <div class="mini-table">
+          <div><span></span><span></span><span></span></div>
+          <div><span></span><span></span><span></span></div>
+          <div><span></span><span></span><span></span></div>
+        </div>
+        <div class="mini-fig"></div>
+        <div class="cols">
+          <div class="col"><div class="l"></div><div class="l" style="width: 80%"></div></div>
+          <div class="col"><div class="l"></div><div class="l" style="width: 66%"></div></div>
+        </div>
+      </div>
+      <div class="caption">the PDF bytes you supply</div>
+    </div>
+
+    <div class="arrow">
+      <svg width="118" height="22" viewBox="0 0 118 22" fill="none">
+        <path d="M2 11 H98" stroke="#ff6f00" stroke-width="3" stroke-linecap="round"/>
+        <path d="M96 3 L112 11 L96 19 Z" fill="#ff6f00"/>
+      </svg>
+      <div class="who">Marker &middot; GPU</div>
+    </div>
+
+    <div class="out">
+      <div class="strip"><b>markdown</b> &nbsp;+&nbsp; figure index &nbsp;&middot;&nbsp; content-addressed, cached</div>
+      <div class="code"><div><span class="h1">## Introduction</span><span class="sp"></span><span class="txt">The dominant sequence transduction models are based on&hellip;</span><span class="sp"></span><span class="tbl">| Model | BLEU |
+| ---   | ---  |
+| Base  | 27.3 |
+| Big   | 28.4 |</span><span class="sp"></span><span class="tex">$$\mathrm{Attention}(Q,K,V) = \mathrm{softmax}(QK^T/\sqrt{d_k})V$$</span><span class="sp"></span><span class="img">![fig-001](figures/fig-001.png)</span>
+<span class="cap">*fig-001: The Transformer architecture.*</span></div></div>
+    </div>
+
+  </div>
+
+  <div class="rail">
+    <div class="chips">
+      <div class="chip">MCP &middot; Streamable HTTP</div>
+      <div class="chip">Marker (GPU)</div>
+      <div class="chip">stateless &middot; no stored user data</div>
+    </div>
+    <div class="repo">github.com/whats2000/paper-mcp</div>
+  </div>
+
+</div>
+</body>
+</html>
