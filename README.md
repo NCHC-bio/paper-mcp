@@ -130,17 +130,17 @@ Against a deployment with `AUTH_MODE=oidc`, the client sends a bearer token from
 ## 🗺️ Architecture (one screen)
 
 ```
-┌──────────────────────┐  Streamable HTTP  ┌─────────────────────────────────────────────┐
-│  MCP client          │  ───────────────► │  paper-mcp · POST /mcp                      │
-│  Claude Cowork /     │  Bearer <token>   │                                             │
+┌──────────────────────┐  Streamable HTTP  ┌──────────────────────────────────────────────┐
+│  MCP client          │  ───────────────► │  paper-mcp · POST /mcp                       │
+│  Claude Cowork /     │  Bearer <token>   │                                              │
 │  Desktop / Cursor /  │                   │   OIDC verify ─► quota ─► allowed-host ─► …  │
 │  any MCP framework   │                   │        │                                     │
 └──────────────────────┘                   │        ├─ extract_pdf ► spool ─► job ────────┤
            ▲                               │        └─ get_job ◄─── depth · page reached ─┤
            │  GET /a/<token>/…             │                        Marker (GPU, jailed) ◄┘
-           └────────────────────────────── │                                             │
+           └────────────────────────────── │                                              │
               figures · bundle.zip         │   artifacts: content-addressed, TTL-swept    │
-                                           └─────────────────────────────────────────────┘
+                                           └──────────────────────────────────────────────┘
 ```
 
 **Nothing per-user is stored.** Artifacts are keyed by content, not by caller: two people asking for the same public paper share one entry, which is deduplication of public data rather than a leak. Identity exists only as a salted hash used to meter quota. That is the security architecture, not an omission — a shared public endpoint with no per-user state has nothing to leak between callers.
