@@ -18,7 +18,7 @@ services:
       # DENSITY, not page count: PaperHub measured a single dense two-column
       # page producing 200+ Surya OCR lines and saturating 6 GB, and a 5-page
       # batch taking 21 minutes. Raise only on a bigger GPU.
-      - PAPER_MCP_MARKER_MAX_PAGES=1
+      - PAPER_MCP_MARKER_MAX_PAGES=${PAPER_MCP_MARKER_MAX_PAGES:-1}
       - PAPER_MCP_ARTIFACT_ROOT=/app/artifacts
       # Extractions running at once. 1 because a second concurrent dense page
       # OOMs a 6 GB card — a statement about the hardware, not the service.
@@ -117,9 +117,10 @@ services:
       # (SRS §I-7).
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       # Which model that accuracy pass calls. marker-pdf carries its own
-      # default and Google has already retired it once — every call 404'd,
+      # default and Google has now retired it twice — every call 404'd,
       # Marker logged a warning, returned 200, and the pass silently stopped
-      # running. Empty falls back to the pinned default in llm_config.py.
+      # running. Empty falls back to the pin in llm_config.py, currently
+      # gemini-3.6-flash.
       - MARKER_GEMINI_MODEL=${MARKER_GEMINI_MODEL:-}
       # Trust the PDF's own text layer instead of re-reading the page.
       # The default (1) is a hardware constraint: Surya's recognition pass on
@@ -176,8 +177,12 @@ services:
       # inside a container with no capabilities and a read-only root. Pinning
       # torch below 2.13 would remove the whole class — both this and the C
       # toolchain the JIT needs — at the cost of overriding the lockfile.
-      - /tmp:size=2g,exec
-    mem_limit: 8g
+      # Scratch grows with the page batch, so raise it alongside
+      # PAPER_MCP_MARKER_MAX_PAGES rather than on its own.
+      - /tmp:size=${MARKER_TMPFS_SIZE:-2g},exec
+    # Host RAM, not VRAM. Sized for the 1-page/OCR-off default; enabling
+    # recognition and batching several pages needs more of both.
+    mem_limit: ${MARKER_MEM_LIMIT:-8g}
     pids_limit: 512
     restart: unless-stopped
     # GPU passthrough. Requires the NVIDIA container toolkit on the host;
@@ -188,7 +193,7 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              count: 1
+              count: ${MARKER_GPU_COUNT:-1}
               capabilities: [gpu]
 
 volumes:

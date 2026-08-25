@@ -23,22 +23,43 @@ def _load() -> ModuleType:
     return module
 
 
+# Every model generation Google has since retired or scheduled for shutdown.
+# A list rather than a single name, because this test previously guarded only
+# `gemini-2.0-flash` and therefore said nothing when the pin that replaced it —
+# `gemini-2.5-flash` — was itself deprecated and began answering 404 for new
+# projects. Add to this as Google moves; the point is that the guard grows
+# with the history rather than tracking one incident.
+RETIRED_MODELS = frozenset({
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-lite",
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-2.5-pro",
+})
+
+
 def test_gemini_model_defaults_to_a_model_google_still_serves(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """marker-pdf 1.10.2 defaults to `gemini-2.0-flash`, which Google retired.
+    """A retired pin costs nothing visible and breaks everything quietly.
 
-    Leaving that default in place cost nothing visible and broke everything
-    quietly: every LLM call answered 404, Marker logged "LLM did not return a
+    marker-pdf 1.10.2 defaults to `gemini-2.0-flash`, which Google retired.
+    Every LLM call then answered 404, Marker logged "LLM did not return a
     valid response" and returned 200, so `use_llm` reported healthy while the
     accuracy pass — including LLMTableProcessor — never ran once.
+
+    That has now happened twice: the model pinned to replace it was itself
+    deprecated. This asserts against the whole history, not the last incident.
     """
     monkeypatch.delenv("MARKER_GEMINI_MODEL", raising=False)
 
     model = _load().gemini_model()
 
     assert model
-    assert model != "gemini-2.0-flash"
+    assert model not in RETIRED_MODELS, (
+        f"the default model {model!r} has been retired by Google; the accuracy "
+        "pass will 404 on every call while /health still reports use_llm: true"
+    )
 
 
 def test_gemini_model_can_be_pinned_by_env(monkeypatch: pytest.MonkeyPatch) -> None:

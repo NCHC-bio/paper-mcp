@@ -11,14 +11,28 @@ response", returned 200, and `/health` went on reporting `use_llm: true`
 while LLMTableProcessor — the pass that keeps table structure honest — never
 ran. Naming the model here makes the version explicit and lets a deployment
 move without waiting on a release.
+
+That has now happened twice. Pinning a name buys time; it does not stop the
+next retirement, and nothing here detects one — `/health` still reports
+`use_llm: true` on a model that 404s. `tests/test_marker_llm_config.py`
+carries a list of retired names so a stale pin fails the suite rather than a
+deployment, but the durable fix is a boot-time probe of the configured model
+that makes `/health` tell the truth. That is not built yet.
 """
 from __future__ import annotations
 
 import os
 
-# Direct successor to the retired `gemini-2.0-flash`, and the same API
-# generation marker-pdf 1.10.2 builds its structured-output calls against.
-DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+# Current stable Flash tier. `gemini-2.5-flash` sat here until Google
+# deprecated it too — retirement 2026-10-16, and already answering 404 for
+# newly created projects well before that date — which is the second time
+# this constant has gone stale underneath a running deployment.
+#
+# The previous-generation Flash rather than the newest: Marker's accuracy
+# pass is a bounded multimodal call with structured output, run once per
+# table, and `gemini-3.7-flash` is tuned for agentic multi-step work this
+# does not do. Move it with `MARKER_GEMINI_MODEL` rather than editing here.
+DEFAULT_GEMINI_MODEL = "gemini-3.6-flash"
 
 _ENV_VAR = "MARKER_GEMINI_MODEL"
 

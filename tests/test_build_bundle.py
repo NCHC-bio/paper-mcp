@@ -230,13 +230,13 @@ async def test_the_bundle_records_which_model_extracted_it(
     """
     class _MarkerWithLlm(_FakeMarker):
         async def profile(self) -> dict[str, object]:
-            return {"use_llm": True, "llm_model": "gemini-2.5-flash"}
+            return {"use_llm": True, "llm_model": "gemini-3.6-flash"}
 
     store = ArtifactStore(tmp_path)
 
     bundle = await build_bundle(_PDF, store=store, marker=_MarkerWithLlm(_doc()))  # type: ignore[arg-type]
 
-    assert bundle.extraction.llm_model == "gemini-2.5-flash"
+    assert bundle.extraction.llm_model == "gemini-3.6-flash"
 
 
 async def test_a_keyless_extraction_records_no_model(
