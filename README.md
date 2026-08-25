@@ -216,11 +216,100 @@ Environment only (twelve-factor). Nothing is read from a config file.
 | `PAPER_MCP_JOB_CONCURRENCY` | `1` | Extractions at once. 1 because a second concurrent dense page OOMs a 6 GB card — raise it on a bigger one. On a shared endpoint this is also the fairness ceiling |
 | `MARKER_DISABLE_OCR` | `1` | *(on the Marker service)* Trust the PDF's text layer instead of re-reading the page. The default avoids a VRAM spike that crashes a 6 GB card, at the cost of inline maths — an integral arrives as `R`, epsilon vanishes, while display equations stay perfect. Set `0` on a bigger card. Each bundle records which mode ran in `extraction.text_source` |
 | `PAPER_MCP_MARKER_MAX_PAGES` | `1` | Pages per Marker call. VRAM scales with page *content density*, not page count: one dense two-column page can saturate 6 GB, and a 5-page batch was measured at 21 minutes. Raise only on a bigger GPU |
-| `MARKER_GEMINI_MODEL` | `gemini-2.5-flash` | *(on the Marker service)* Model backing Marker's `use_llm` accuracy pass. marker-pdf carries its own default and Google has already retired it once — every call answered 404 while Marker returned `200`, so the pass stopped running with nothing to show for it. Pin it here when Google moves again |
+| `MARKER_GEMINI_MODEL` | `gemini-3.6-flash` | *(on the Marker service)* Model backing Marker's `use_llm` accuracy pass. Google has now retired the pinned model **twice** — `gemini-2.0-flash`, then `gemini-2.5-flash` — and the failure is silent both times: every call answers 404 while Marker returns `200` and `/health` still reports `use_llm: true`, so the pass stops running with nothing to show for it. Pin it here when Google moves again, and check `extraction.llm_model` on a fresh bundle to confirm the pass actually ran |
 | `PAPER_MCP_PUBLIC_BASE_URL` | `http://localhost:8000` | Origin the artifact URLs are built from. Nothing is persisted with it — URLs are derived on every serve, so moving hosts does not strand a warm cache |
 | `PAPER_MCP_ARTIFACT_ROOT` | `artifacts` | Content-addressed cache for bundles and figure images |
 | `PAPER_MCP_ARTIFACT_TTL_HOURS` | `24` | How long artifacts survive before the sweeper reclaims them |
 | `PAPER_MCP_LOG_LEVEL` | `INFO` | Log level, applied to uvicorn too. `WARNING` drops per-request access logging: measured 18,222 → 114 bytes over 300 requests. Worth setting for a public deployment — a server whose stdout backs up blocks inside `write()`, and per-request logging is what fills the buffer |
+
+### Sizing for your hardware
+
+> [!IMPORTANT]
+> **Every default in this repo is sized for a 6 GB laptop GPU.** That is a
+> statement about the machine this was built on, not about the service. On a
+> bigger card the defaults leave most of it idle — and one of them is
+> silently costing you accuracy.
+
+Three knobs carry that assumption. They are safe defaults, so a laptop clone
+runs on first try, but you should change them the moment you deploy on real
+hardware:
+
+| Variable | Default (6 GB) | Why it is that low | On a bigger card |
+| --- | --- | --- | --- |
+| `MARKER_DISABLE_OCR` | `1` | Surya's line-recognition pass measured **~5.9 GB** on a dense two-column page and crashes a 6 GB card | **`0`** — see below |
+| `PAPER_MCP_MARKER_MAX_PAGES` | `1` | one dense two-column page can saturate 6 GB on its own | `4`–`8`, measured |
+| `PAPER_MCP_JOB_CONCURRENCY` | `1` | a second concurrent dense page OOMs a 6 GB card | `2`–`4`, measured |
+
+**`MARKER_DISABLE_OCR=0` is not a performance setting — it is a correctness
+one, and it is the single most valuable change on capable hardware.** With
+OCR disabled, Marker trusts the PDF's embedded text layer, which encodes
+maths through Type1 font tables: an integral arrives as the character `R`, a
+product as `Q`, and epsilon vanishes entirely, degrading prose to *"we can
+train it to predict ."* Display equations carry their own LaTeX and stay
+perfect, which hides the damage — spot-checking the maths will not reveal
+it. Every bundle records which mode produced it in `extraction.text_source`,
+so check that field rather than assuming.
+
+The other two want measuring rather than maximising. VRAM scales with page
+**content density**, not page count, and batching has a latency cliff as well
+as a memory one: a 5-page batch measured **21 minutes** on the small card.
+Raise `MARKER_MAX_PAGES` a step at a time against a genuinely dense
+two-column paper — not a preprint — and watch VRAM before going further.
+
+Supporting limits, which are host RAM and disk rather than VRAM, and should
+move up alongside a bigger batch:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `MARKER_MEM_LIMIT` | `8g` | Host RAM ceiling for the Marker container |
+| `MARKER_TMPFS_SIZE` | `2g` | `/tmp` scratch, which grows with the page batch |
+| `MARKER_GPU_COUNT` | `1` | GPUs reserved for Marker |
+
+#### Applying it
+
+Compose reads a `.env` beside `docker-compose.yml` automatically, so a
+deployment's sizing lives in one reviewed file rather than in shell history:
+
+```bash
+# .env — sizing for a 24 GB+ card. Start here, then measure.
+MARKER_DISABLE_OCR=0              # correct inline maths; the important one
+PAPER_MCP_MARKER_MAX_PAGES=4      # raise a step at a time
+PAPER_MCP_JOB_CONCURRENCY=2       # also the per-caller fairness ceiling
+MARKER_MEM_LIMIT=24g
+MARKER_TMPFS_SIZE=8g
+PAPER_MCP_MAX_QUEUED_JOBS=32      # ~queue minutes ÷ per-paper time
+```
+
+Confirm what compose actually resolved before deploying — the values are
+substituted, not validated:
+
+```bash
+docker compose config | grep -E "DISABLE_OCR|MAX_PAGES|CONCURRENCY|mem_limit"
+```
+
+`PAPER_MCP_JOB_CONCURRENCY` is doing double duty: on a shared endpoint it is
+also the fairness ceiling, because one caller's queue stalls everyone behind
+it. Raising it buys throughput *and* reduces how badly a single heavy caller
+can monopolise the GPU.
+
+#### On a cluster, run one replica
+
+This service keeps jobs, quota buckets and the JWKS cache **in process
+memory**. Scale it vertically — a bigger card and the knobs above — not
+horizontally. With more than one replica behind a load balancer:
+
+- `get_job` on replica B returns `not_found` for a job replica A is running.
+- Coalescing is per-replica, so two replicas each start their own GPU
+  extraction of the same paper — defeating the one mechanism that exists to
+  protect the GPU.
+- Quota is per-replica: N replicas means N× every budget, bypassable by
+  reconnecting.
+- The artifact cache needs `ReadWriteMany` to be shared at all.
+
+One replica on a large GPU is a supported, well-tested configuration.
+Horizontal scaling is not a config change — it needs the quota store and job
+registry moved into shared state, which v1.0 deliberately traded away for a
+single-host deployment (SRS §II-6).
 
 ### Why there is no search
 
